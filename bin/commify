@@ -1,0 +1,17 @@
+#! /usr/bin/env perl
+
+use strict;
+use warnings;
+
+while (<>) {
+    print commify($_);
+}
+exit;
+
+
+# perl cookbook recipe 2.17: Putting commas in numbers
+sub commify {
+    my $text = reverse $_[0];
+    $text =~ s/(\d\d\d)(?=\d)(?!\d*\.)/$1,/g;
+    return scalar reverse $text;
+}

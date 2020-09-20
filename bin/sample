@@ -1,0 +1,137 @@
+#! /usr/bin/env perl
+#
+# produce a randomly chosen sample of the input stream
+#  requires 1 parameter, the sampling rate.
+#
+#  Jeff McCarrell 2008 June
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+
+my $prog = $0;
+$prog =~ s{\A.*/}{};   # strip leading path, if any
+my $sampling;
+
+unless (GetOptions('r=s' => \$sampling)) {
+    die usage();
+}
+die "no sampling rate found with -r\n\n", usage() unless ($sampling);
+
+my $rate;
+if ($sampling =~ qr{^([\d.]+)%$}) {
+    $rate = ($1 / 100);
+} else {
+    $rate = $sampling + 0;
+}
+
+
+my $floor = 0.000001;
+die "rate $rate out of range; must be >= $floor and <= 1.0\n\n"
+    unless ($rate >= $floor and $rate <= 1.0);
+
+my ($divisor, $dividend) = integer_ratio($rate);
+my ($sampled_lines, $negate) = line_list($divisor, $dividend);
+
+my $next_range = $dividend;
+my @match_lines = @$sampled_lines;
+while (<>) {
+    if ($negate) {
+        # we print iff we are not on a match line.
+        #  not on a match line is: nothing in the list,
+        #   or the line we are looking at is not in the match list.
+        #  we shift when we are on a match line
+        if (scalar(@match_lines) and $. != $match_lines[0]) {
+            print;
+            next;
+        }
+        if (scalar(@match_lines) == 0) {
+            print;
+            next;
+        }
+        if (scalar(@match_lines) and $. == $match_lines[0]) {
+            shift @match_lines;
+            next;
+        }
+        next;
+    }
+    # handle normal case
+    if (scalar(@match_lines) and $. == $match_lines[0]) {
+        print;
+        shift @match_lines;
+    }
+}
+continue {
+    # choose a new set of random lines to emit in the next range
+    if ($. >= $next_range) {
+        $next_range += $dividend;
+        my ($s_lines) = line_list($divisor, $dividend);
+        @match_lines = map { $_ += $. } @$s_lines;
+    }
+}
+
+exit;
+
+# given a ratio, return a ascending sorted list of randomly selected integers inside
+#  the range of the ratio.
+#  to make it somewhat more efficient, if the ratio is > 0.5, return
+#  the smaller list, and a negation flag.
+# so  5 / 100 returns  ( [ 5 random ints between 1 and 100 ], 0)
+#    95 / 100                     the same                  , 1)
+sub line_list {
+    die "line_list must have 2 args" unless (@_ == 2);
+    my ($num_ints, $range) = @_;
+    my $negate = 0;
+
+    if (($num_ints / $range) > 0.5) {
+        $num_ints = $range - $num_ints;
+        $negate++;
+    }
+
+    # make a list of of random ints without duplication
+    my $n = $num_ints;
+    my %i;
+    while ($n > 0) {
+        # rand operates between 0 and whatever; we need 1 to $range.
+        my $r = int(rand($range - 1));
+        $r++;
+        next if (exists $i{$r});
+
+        $i{$r}++;
+        $n--;
+    }
+
+    return ([ sort { $a <=> $b } keys %i ], $negate);
+}
+
+#
+# return the integer ratio of the floating point argument sample rate argument
+# so 0.5      = (5, 10)
+#    0.375    = (375, 1000)
+#  etc.
+# XXX: numerator / denominator
+sub integer_ratio {
+    # convert to a known float format; 6e-06 doesn't work so good for this algorithm.
+    my $s = reverse sprintf("%9.6f", $_[0]);
+    # strip leading 0's; else 15% == 150,000 / 1,000,000
+    $s =~ s/^0+//;
+
+    my $decimal_pt = index($s, '.');
+    my $dividend = (reverse substr($s, 0, $decimal_pt)) + 0;
+    return ($dividend, (10 ** $decimal_pt));
+}
+
+
+sub usage {
+    return <<"eousage";
+usage: $prog -r sampling_rate <inputs>
+
+Produce a random sample of the input stream.
+Meant to be used to create subsamples of largish input files.
+
+the rate given by -r can be:
+a percentage, like: -r 5%     for  5%
+or a float,   like: -r 0.1    for  10%
+eousage
+}
