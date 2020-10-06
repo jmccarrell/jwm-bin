@@ -1,0 +1,51 @@
+#!/usr/local/bin/zsh -f
+# search Jeffs sift notes locations with the silver searcher
+
+function sift_home() {
+    declare -a dirs_to_search=("$HOME/sift" "$HOME/pdata/employers/sift")
+    for d in ${dirs_to_search[@]}; do
+        if [[ -d "$d" ]] && [[ -e "$d" ]]; then
+            printf "$d"
+            return
+        fi
+    done
+    printf "unknown"
+}
+
+function sift_search_dirs {
+    readonly -a search_dirs=(
+        "$(sift_home)/notes"
+        "$(sift_home)/todo"
+        "$(sift_home)/pdata/notes"
+        "$(sift_home)/pdata/todo"
+    )
+    for d in ${search_dirs[@]}; do
+        if [[ -d "$d" ]]; then
+            print "$d"
+        fi
+    done
+}
+
+function emacs_org_agenda_dirs {
+    # search current areas of interest, as represented in my emacs org agena list
+    local -r emacs_org_agenda_fname="$HOME/.emacs.d/org-agenda-files-list"
+    if [[ -e "$emacs_org_agenda_fname" ]]; then
+        while read filename rest; do
+            # replace ~ with $HOME
+            filename="${filename//\~/$HOME}"
+            if [[ -s $filename ]]; then
+                # replace files with the directories they reside in
+                print "$filename:h"
+            fi
+        done < "$emacs_org_agenda_fname"
+    fi
+}
+
+function sag_search_dirs {
+    sift_search_dirs
+    emacs_org_agenda_dirs
+}
+
+# de-dup using zsh unique array.  see the manual: zsh builtins: typeset -U
+declare -a -U unique_search_dirs=($(sag_search_dirs))
+ag $@ $unique_search_dirs
