@@ -43,7 +43,6 @@ function emacs_org_agenda_dirs {
 
 function sag_search_dirs {
     sift_search_dirs
-    emacs_org_agenda_dirs
 }
 
 # de-dup using zsh unique array.  see the manual: zsh builtins: typeset -U
