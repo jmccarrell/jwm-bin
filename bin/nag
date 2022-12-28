@@ -3,10 +3,11 @@
 
 function jwm_search_dirs {
     local -r -a search_dirs=(
-        ${HOME}/jwm/notes
-        ${HOME}/jwm/todo
+        ${HOME}/jwm/proj
         ${HOME}/pdata/notes
         ${HOME}/pdata/todo
+        ${HOME}/jwm/notes
+        ${HOME}/jwm/todo
     )
     for d in ${search_dirs[@]}; do
         if [[ -d "$d" ]]; then
