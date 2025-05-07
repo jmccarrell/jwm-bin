@@ -1,0 +1,42 @@
+#!/usr/bin/env zsh -f
+# search Jeffs persona notes and recent work locations with the silver searcher
+
+function persona_search_dirs {
+    local -r -a search_dirs=(
+        ${HOME}/persona/notes
+    )
+    for d in ${search_dirs[@]}; do
+        if [[ -d "$d" ]]; then
+            print "$d"
+        fi
+    done
+}
+
+function emacs_org_agenda_dirs {
+    # search current areas of interest, as represented in my emacs org agena list
+    local -r emacs_org_agenda_fname="$HOME/.emacs.d/org-agenda-files-list"
+    if [[ -e "$emacs_org_agenda_fname" ]]; then
+        while read filename rest; do
+            # replace ~ with $HOME
+            filename="${filename//\~/$HOME}"
+            if [[ -s $filename ]]; then
+                # replace files with the directories they reside in
+                print "$filename:h"
+            fi
+        done < "$emacs_org_agenda_fname"
+    fi
+}
+
+
+# this function produces duplicates, as often I will have files in the org agenda file list
+#  that reside in one of the directories in search_dirs.
+function pag_search_dirs {
+    persona_search_dirs
+    emacs_org_agenda_dirs
+}
+# turn on debug tracing just for this named function
+# typeset -T -f pag_search_dirs
+
+# de-dup using zsh unique array.  see the manual: zsh builtins: typeset -U
+declare -a -U unique_search_dirs=($(pag_search_dirs))
+ag $@ $unique_search_dirs
