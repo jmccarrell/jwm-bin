@@ -1,0 +1,42 @@
+#!/opt/homebrew/bin/bash
+# daily -- weekday-morning maintenance, driven by the org.mccarrell.daily
+# LaunchAgent (see ../Library/LaunchAgents/org.mccarrell.daily.plist). Safe to
+# run by hand as well. Today it just syncs every git repo via gs_all; add more
+# morning chores here over time.
+
+set -u
+
+log_file="${HOME}/Library/Logs/daily.log"
+mkdir -p "${HOME}/Library/Logs"
+
+# launchd gives batch jobs no terminal, so we own the log redirection here
+# rather than via the plist's StandardOutPath -- that keeps the plist free of
+# any absolute home-directory path, so the identical plist works on every mac.
+# When run by hand (stdout is a TTY) also echo to the terminal via tee.
+if [ -t 1 ]; then
+    exec > >(tee -a "${log_file}") 2>&1
+else
+    exec >> "${log_file}" 2>&1
+fi
+
+printf '\n===== daily %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+# Load what gs_all needs: the gs_* / git_sync functions, plus the real PATH
+# (brew git, asdf, ...). jwm_set_path uses bash-4+ associative arrays, hence the
+# Homebrew bash shebang above.
+source "${HOME}/.functions"
+source "${HOME}/.path"
+jwm_set_path
+
+gs_all
+status=$?
+
+if (( status != 0 )); then
+    failures="${GS_ALL_FAILURES[*]:-unknown}"
+    printf 'daily: FAILED syncing: %s\n' "${failures}"
+    osascript -e "display notification \"Failed: ${failures}. See ~/Library/Logs/daily.log\" with title \"daily sync failed\"" >/dev/null 2>&1 || true
+else
+    printf 'daily: OK\n'
+fi
+
+exit "${status}"

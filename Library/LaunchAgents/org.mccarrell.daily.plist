@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.mccarrell.daily</string>
+
+    <!-- Run via a shell so $HOME is expanded at runtime: launchd does NOT
+         expand ~ / $HOME / env vars in plist strings, and the home directory
+         differs between machines. /opt/homebrew/bin/bash is a stable absolute
+         path on Apple Silicon; it execs the real script found under $HOME. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/bash</string>
+        <string>-c</string>
+        <string>exec "$HOME/bin/daily"</string>
+    </array>
+
+    <!-- Weekdays (Mon=1 .. Fri=5) at 06:00 local time. If the mac is asleep at
+         06:00, launchd runs the job once on the next wake; it is skipped only
+         when logged out. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- The script owns its own log (~/Library/Logs/daily.log). Only very early
+         failures -- before the script sets up redirection -- land here. /tmp is
+         identical on every mac, so this stays home-directory-independent. -->
+    <key>StandardErrorPath</key>
+    <string>/tmp/org.mccarrell.daily.boot.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
