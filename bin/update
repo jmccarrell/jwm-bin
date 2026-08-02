@@ -26,14 +26,15 @@ source "${HOME}/.functions"
 source "${HOME}/.path"
 jwm_set_path
 
-# ~/.extra is untracked and machine-local, and is sourced here but deliberately
-# NOT by daily. jwm_refresh_completions has a seam for it: ~/.extra may define
-# jwm_refresh_completions_extra to write completions for tools that should not be
-# named in a public repo. Without this the interactive refresh would quietly do
-# less than the alias it replaces, with nothing to say so. Guarded because the
-# other mac need not have one.
-# shellcheck source=/dev/null
-[ -r "${HOME}/.extra" ] && source "${HOME}/.extra"
+# ~/.extra is deliberately not sourced, and used to be. Its only justification was
+# jwm_refresh_completions' seam, which let that file write completions for tools this
+# repo would not name; jwm-dotfiles-2024#38 retired the seam and tracks wiggum's line
+# directly. What is left in ~/.extra is two Artifactory exports and three interactive
+# aliases, none of which anything here reads -- and aliases do not expand in a
+# non-interactive script regardless.
+#
+# So this now matches `daily`, which never sourced it: both take ~/.functions and
+# ~/.path, nothing more.
 
 # jwm_update_tools appends to this; the caller owns resetting it, the same way
 # daily owns resetting GS_FAILURES.
