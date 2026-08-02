@@ -29,6 +29,36 @@ check:
     stow {{stow_flags}} --no -t {{home_dir / "bin"}} -S bin
     stow {{stow_flags}} --no -t {{home_dir / "Library"}} -S Library
 
+# Remove install-target links left behind by scripts this repo no longer has.
+# Stow only knows about files that are present in the package, so deleting
+# bin/foo leaves a dangling ~/bin/foo forever -- neither install nor restow
+# reaps it. Only broken symlinks pointing into this repo are removed; real
+# files and links owned by anything else are left alone.
+#
+# Remove links left behind by scripts this repo no longer has
+prune:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # the main checkout, even when run from a worktree -- that is what the
+    # installed links point at
+    repo="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+    n=0
+    for target in {{home_dir / "bin"}} {{home_dir / "Library/LaunchAgents"}}; do
+        [ -d "$target" ] || continue
+        for link in "$target"/*; do
+            [ -L "$link" ] || continue   # never touch a real file
+            [ -e "$link" ] && continue   # still resolves; not stale
+            raw="$(readlink "$link")"
+            # the link is broken, so resolve its parent dir (which does exist)
+            # rather than the path itself
+            dir="$(cd "$(dirname "$link")" && cd "$(dirname "$raw")" 2>/dev/null && pwd)" || continue
+            case "$dir/$(basename "$raw")" in
+                "$repo"/*) echo "removing $link -> $raw"; rm "$link"; n=$((n + 1)) ;;
+            esac
+        done
+    done
+    echo "prune: removed $n stale link(s)"
+
 # Test install into a temp directory
 test: (stow-pkg (test_dir / "bin") "bin") (stow-pkg (test_dir / "Library") "Library")
 
