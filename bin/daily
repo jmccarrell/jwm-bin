@@ -8,6 +8,13 @@
 # one machine sits in that machine's block instead of being guarded inline. The
 # host predicates and the gs_* repo groups both come from ~/.functions.
 #
+# Those host sections now hold only repo syncing. The toolchain upgrades that
+# used to sit in them moved to jwm_update_tools (~/.functions), which `update`
+# calls too -- the two had drifted, and daily was the one losing: it upgraded
+# brew every morning and refreshed neither the completion nor the shell-init
+# cache. jwm_update_tools does its own host branching, for which brew rather
+# than for whose chores, so there is no longer a brew line in either section.
+#
 # Nothing here aborts on failure: every step runs, failures are collected, and
 # one notification at the end names all of them.
 
@@ -35,17 +42,20 @@ source "${HOME}/.functions"
 source "${HOME}/.path"
 jwm_set_path
 
-# GS_FAILURES collects repo labels from the gs_* groups, DAILY_FAILURES the
-# chores below. The gs_* groups append without resetting, so we reset here.
+# GS_FAILURES collects repo labels from the gs_* groups, UPDATE_FAILURES step
+# labels from jwm_update_tools, DAILY_FAILURES the chores that are only ours.
+# All three append without resetting, so we reset here.
 GS_FAILURES=()
+UPDATE_FAILURES=()
 DAILY_FAILURES=()
 
 # Nobody reads a hint banner in a log file.
 export HOMEBREW_NO_ENV_HINTS=1
 
-# Tools are not probed with `command -v` before use. Both macs have all of
-# these, so a missing one is a fault worth hearing about -- and a skip-if-absent
-# guard would have quietly hidden rustup being off the launchd PATH entirely.
+# Tools are not probed with `command -v` before use, here or in jwm_update_tools.
+# Both macs have all of them, so a missing one is a fault worth hearing about --
+# and a skip-if-absent guard would have quietly hidden rustup being off the
+# launchd PATH entirely, which is the bug that set this policy.
 
 # ---------------------------------------------------------------- common -----
 gs_common
@@ -56,8 +66,16 @@ gs_common
 # sat in it doing nothing until someone ran `just install` by hand -- which is
 # how jwm-dotfiles-2024#31 shipped .config/uv/uv.toml and it stayed unlinked.
 # The repo stows with --no-folding, one symlink per file, so a new file genuinely
-# requires a new link; jwm-bin does not have this problem because ~/bin is a
-# single folded dir symlink that picks up new scripts for free.
+# requires a new link.
+#
+# jwm-bin needs the same treatment now and does not get it here. ~/bin used to be
+# a single folded dir symlink into jwm-bin/bin, which picked up new scripts for
+# free -- but that made stow's target and package the same directory, so the -R
+# added in jwm-bin#10 unstowed the repo's own scripts and deleted all eight. ~/bin
+# is a real dir with per-file symlinks now, which fixes that permanently and
+# costs this: a script added to jwm-bin needs `just install` there before it is on
+# PATH. Not automated here yet -- deliberately, since jwm-bin's install is what
+# caused that incident, and it deserves its own change rather than a ride-along.
 #
 # `just install` restows (-R) rather than stows, so this also removes the
 # dangling symlink a file DELETED from the repo would otherwise leave behind --
@@ -68,61 +86,52 @@ gs_common
 ( cd "$(jwm_dir)/proj/jwm-dotfiles-2024" && just install ) \
             || DAILY_FAILURES+=(dotfiles-install)
 
-rustup update || DAILY_FAILURES+=(rustup)
-
 # ------------------------------------------------------------- jwm_host_p ----
 if jwm_host_p; then
     gs_jwm_host
-
-    brew update           || DAILY_FAILURES+=(brew-update)
-    brew upgrade --no-ask || DAILY_FAILURES+=(brew-upgrade)
 fi
 
 # ---------------------------------------------------------- mark43_host_p ----
 if mark43_host_p; then
     gs_mark43_host
-
-    # Workbrew machine: casks are disallowed by the workspace policy
-    # (/opt/workbrew/var/workbrew.env.json), and a cask upgrade is also the case
-    # most likely to want a prompt -- which launchd cannot answer. So formulae
-    # only. NO_AUTO_UPDATE stops upgrade re-running the update we just did.
-    brew update || DAILY_FAILURES+=(brew-update)
-    HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --formula \
-                || DAILY_FAILURES+=(brew-upgrade)
 fi
 
-# ------------------------------------------------------- after the upgrade ---
-# Host-independent chores, placed after both host blocks rather than in either.
-# `uv` is itself a brew formula, so running here means the freshly-upgraded uv
-# does the work -- the same ordering argument the pyenv link pass used to make,
-# for a different reason.
+# ------------------------------------------------------ toolchain upgrades ---
+# brew update and a host-aware brew upgrade, then uv python upgrade, rustup
+# update, and finally the bash completion and shell-init caches. The order inside
+# is a dependency chain rather than a preference -- see jwm_update_tools.
 #
-# Move uv's managed interpreters to the newest patch in their series. uv owns
-# `python`/`python3` out of ~/.local/bin now, and nothing else advances them:
-# `brew upgrade` only moves the python@3.x brew keeps for chart-testing and
-# ollama, which is no longer on PATH as anything you type. So without this line
-# the interpreter you actually use would sit at whatever patch it was installed
-# at, indefinitely.
+# Here rather than in either host section because it is host-independent: it does
+# its own branching, for which brew rather than for whose chores.
 #
-# The ~/.local/bin entries point at uv's *series* symlink rather than the patch
-# dir, so a 3.14.6 -> 3.14.7 bump carries them forward with nothing to relink --
-# which is what makes this a one-liner where the pyenv pass it replaced needed
-# 185 lines of register-and-prune. It will not cross a minor: 3.14 -> 3.15 is a
-# deliberate `uv python install --default 3.15`, once a year.
+# Shared with `update` (bin/update) so the unattended and interactive paths cannot
+# drift apart again. Everything in it is safe with no terminal; the steps that
+# need sudo stay in bin/update, which is what keeps this line from walking into a
+# password prompt launchd has no way to answer.
 #
-# Deliberately NOT guarded on `command -v uv`, unlike the pyenv pass, which
-# returned 0 when pyenv was absent. pyenv was optional scaffolding; uv is the
-# interpreter. A missing uv means a missing `python`, and that belongs in the
-# failure report rather than being skipped quietly.
+# Failures land in UPDATE_FAILURES with a per-step label, so the notification can
+# still say brew-upgrade or shell-init rather than just "update".
 #
-# On Mark43 macs this needs system-certs, because Zscaler MITMs the host serving
-# python-build-standalone tarballs. That lives in ~/.config/uv/uv.toml (dotfiles)
-# rather than an export, precisely because this script sources only ~/.functions
-# and ~/.path -- never ~/.bash_profile.
-uv python upgrade || DAILY_FAILURES+=(uv-python)
+# On Mark43 macs the uv step needs system-certs, because Zscaler MITMs the host
+# serving python-build-standalone tarballs. That lives in ~/.config/uv/uv.toml
+# (dotfiles) rather than an export, precisely because this script sources only
+# ~/.functions and ~/.path -- never ~/.bash_profile.
+#
+# Guarded on existence, which is not paranoia about typos: ~/.functions is sourced
+# at the top of this script, well before the `just install` above can stow a newly
+# pulled copy. So on the first run after jwm_update_tools lands in dotfiles -- or
+# any run where that repo is behind -- the function genuinely is not defined. Bare,
+# the call would fail 127, append no label, and let this script report OK having
+# skipped every toolchain upgrade. It takes effect next run; this says so out loud.
+if declare -F jwm_update_tools > /dev/null; then
+    jwm_update_tools
+else
+    printf 'daily: jwm_update_tools not defined in ~/.functions; skipping upgrades\n' >&2
+    DAILY_FAILURES+=(update-tools-missing)
+fi
 
 # ---------------------------------------------------------------- report -----
-failures=( "${GS_FAILURES[@]}" "${DAILY_FAILURES[@]}" )
+failures=( "${GS_FAILURES[@]}" "${UPDATE_FAILURES[@]}" "${DAILY_FAILURES[@]}" )
 
 if (( ${#failures[@]} != 0 )); then
     printf 'daily: FAILED: %s\n' "${failures[*]}"
