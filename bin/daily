@@ -79,11 +79,15 @@ fi
 #
 # Re-link the Homebrew pythons into ~/.pyenv/versions. A new brew python is the
 # only thing that makes those links stale, and `brew upgrade` is the only place
-# a new one arrives -- so this is the causally correct trigger. It used to run
-# from ~/.bash_profile via jwm_set_path, where it cost ~0.7s of the ~1.4s spent
-# starting every login shell (12 `python3 -c` version probes plus ~200 `ln`
-# calls), i.e. a once-a-day chore billed to every new terminal tab. The
-# interactive `update` alias calls it for the same reason.
+# a new one arrives -- so this is the causally correct trigger. It runs from
+# ~/.bash_profile via jwm_set_path today, where it costs ~0.7s of the ~1.4s
+# spent starting every login shell (12 `python3 -c` version probes plus ~200
+# `ln` calls) -- a once-a-day chore billed to every new terminal tab.
+#
+# This lands first and is deliberately inert: until jwm-dotfiles-2024#28 drops
+# the startup call and adds the matching one to the `update` alias, the linking
+# simply happens both here and at every shell start. That is harmless, the pass
+# being idempotent, and it means no window where nothing links the pythons.
 #
 # Defined in ~/.path, already sourced above.
 jwm_pyenv_link_homebrew_pythons || DAILY_FAILURES+=(pyenv-link)
