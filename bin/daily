@@ -50,6 +50,24 @@ export HOMEBREW_NO_ENV_HINTS=1
 # ---------------------------------------------------------------- common -----
 gs_common
 
+# Install the dotfiles seed, immediately after the sync that motivates it.
+#
+# gs_dotfiles only pulls. Nothing linked the result, so a file added to the repo
+# sat in it doing nothing until someone ran `just install` by hand -- which is
+# how jwm-dotfiles-2024#31 shipped .config/uv/uv.toml and it stayed unlinked.
+# The repo stows with --no-folding, one symlink per file, so a new file genuinely
+# requires a new link; jwm-bin does not have this problem because ~/bin is a
+# single folded dir symlink that picks up new scripts for free.
+#
+# `just install` restows (-R) rather than stows, so this also removes the
+# dangling symlink a file DELETED from the repo would otherwise leave behind --
+# see jwm-dotfiles-2024#34. Unconditional rather than gated on the repo having
+# changed: it is 24ms, silent on a healthy tree, and exact where a HEAD
+# comparison would miss an uncommitted file or a hand-broken link. On a conflict
+# it aborts without touching anything and exits 1, which lands here.
+( cd "$(jwm_dir)/proj/jwm-dotfiles-2024" && just install ) \
+            || DAILY_FAILURES+=(dotfiles-install)
+
 rustup update || DAILY_FAILURES+=(rustup)
 
 # ------------------------------------------------------------- jwm_host_p ----
