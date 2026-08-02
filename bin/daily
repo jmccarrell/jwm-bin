@@ -74,23 +74,34 @@ if mark43_host_p; then
 fi
 
 # ------------------------------------------------------- after the upgrade ---
-# Chores that only a brew upgrade invalidates, so they belong after both host
-# blocks above rather than in either one.
+# Host-independent chores, placed after both host blocks rather than in either.
+# `uv` is itself a brew formula, so running here means the freshly-upgraded uv
+# does the work -- the same ordering argument the pyenv link pass used to make,
+# for a different reason.
 #
-# Re-link the Homebrew pythons into ~/.pyenv/versions. A new brew python is the
-# only thing that makes those links stale, and `brew upgrade` is the only place
-# a new one arrives -- so this is the causally correct trigger. It runs from
-# ~/.bash_profile via jwm_set_path today, where it costs ~0.7s of the ~1.4s
-# spent starting every login shell (12 `python3 -c` version probes plus ~200
-# `ln` calls) -- a once-a-day chore billed to every new terminal tab.
+# Move uv's managed interpreters to the newest patch in their series. uv owns
+# `python`/`python3` out of ~/.local/bin now, and nothing else advances them:
+# `brew upgrade` only moves the python@3.x brew keeps for chart-testing and
+# ollama, which is no longer on PATH as anything you type. So without this line
+# the interpreter you actually use would sit at whatever patch it was installed
+# at, indefinitely.
 #
-# This lands first and is deliberately inert: until jwm-dotfiles-2024#28 drops
-# the startup call and adds the matching one to the `update` alias, the linking
-# simply happens both here and at every shell start. That is harmless, the pass
-# being idempotent, and it means no window where nothing links the pythons.
+# The ~/.local/bin entries point at uv's *series* symlink rather than the patch
+# dir, so a 3.14.6 -> 3.14.7 bump carries them forward with nothing to relink --
+# which is what makes this a one-liner where the pyenv pass it replaced needed
+# 185 lines of register-and-prune. It will not cross a minor: 3.14 -> 3.15 is a
+# deliberate `uv python install --default 3.15`, once a year.
 #
-# Defined in ~/.path, already sourced above.
-jwm_pyenv_link_homebrew_pythons || DAILY_FAILURES+=(pyenv-link)
+# Deliberately NOT guarded on `command -v uv`, unlike the pyenv pass, which
+# returned 0 when pyenv was absent. pyenv was optional scaffolding; uv is the
+# interpreter. A missing uv means a missing `python`, and that belongs in the
+# failure report rather than being skipped quietly.
+#
+# On Mark43 macs this needs system-certs, because Zscaler MITMs the host serving
+# python-build-standalone tarballs. That lives in ~/.config/uv/uv.toml (dotfiles)
+# rather than an export, precisely because this script sources only ~/.functions
+# and ~/.path -- never ~/.bash_profile.
+uv python upgrade || DAILY_FAILURES+=(uv-python)
 
 # ---------------------------------------------------------------- report -----
 failures=( "${GS_FAILURES[@]}" "${DAILY_FAILURES[@]}" )
