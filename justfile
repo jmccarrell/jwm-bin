@@ -15,19 +15,22 @@ stow_flags := "--verbose --no-folding"
 @_:
     just --list
 
-# stow one package tree onto its target, creating the target if needed
+# Restow (-R) rather than stow (-S). Unstow works by scanning the target for
+# links that resolve into the package, not by listing the package, so it also
+# picks up links whose source is gone -- delete bin/foo and the next install
+# reaps ~/bin/foo. Plain -S only ever adds, leaving those dangling forever.
 [private]
 stow-pkg target pkg *flags:
     mkdir -p {{target}}
-    stow {{stow_flags}} {{flags}} -t {{target}} -S {{pkg}}
+    stow {{stow_flags}} {{flags}} -t {{target}} -R {{pkg}}
 
 # Install the bin/ scripts and the LaunchAgents
 install: (stow-pkg (home_dir / "bin") "bin") (stow-pkg (home_dir / "Library") "Library")
 
 # Preview the install without writing anything
 check:
-    stow {{stow_flags}} --no -t {{home_dir / "bin"}} -S bin
-    stow {{stow_flags}} --no -t {{home_dir / "Library"}} -S Library
+    stow {{stow_flags}} --no -t {{home_dir / "bin"}} -R bin
+    stow {{stow_flags}} --no -t {{home_dir / "Library"}} -R Library
 
 # Test install into a temp directory
 test: (stow-pkg (test_dir / "bin") "bin") (stow-pkg (test_dir / "Library") "Library")
