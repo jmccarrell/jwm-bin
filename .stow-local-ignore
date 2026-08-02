@@ -1,7 +1,10 @@
 foo
 test-data
 
-Makefile
+justfile
+
+# repo-local Claude settings; belong to this checkout, not to ~/.claude
+\.claude
 
 # all of the generic choices from the global stow ignore file
 # Comments and blank lines are allowed.
