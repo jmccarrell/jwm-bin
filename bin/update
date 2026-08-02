@@ -1,54 +1,18 @@
 #!/opt/homebrew/bin/bash
 # update -- bring this mac's toolchains up to date, interactively.
 #
-# The shared chore list lives in jwm_update_tools (~/.functions), which `daily`
-# also calls: one inventory, two entry points. What stays here is only what needs
-# a terminal, which in practice means sudo -- launchd has no tty to answer a
-# password prompt on, so those steps can never live in the shared function.
-# That split is the whole gate; there is no --unattended flag to get wrong.
-#
-# This was an alias in ~/.aliases until it outgrew one. Choosing the right
-# `brew upgrade` needs the host predicates, and the alias had drifted from what
-# daily does unattended -- daily upgraded brew every morning and refreshed
-# neither the completion nor the shell-init cache, so both sat pointing at the
-# previous versions' output until someone typed `update` by hand.
-#
 # Nothing here aborts on failure: every step runs, and one line at the end names
 # whatever broke. Same contract as daily.
 
 set -u
 
-# The same two files daily sources -- for the host predicates, jwm_update_tools,
-# and a PATH that actually has brew/rustup/uv on it. A script gets none of an
-# interactive shell's setup when it is launched from somewhere else. jwm_set_path
-# needs bash-4+ associative arrays, hence the Homebrew bash shebang above.
 source "${HOME}/.functions"
 source "${HOME}/.path"
 jwm_set_path
 
-# ~/.extra is deliberately not sourced, and used to be. Its only justification was
-# jwm_refresh_completions' seam, which let that file write completions for tools this
-# repo would not name; jwm-dotfiles-2024#38 retired the seam and tracks wiggum's line
-# directly. What is left in ~/.extra is two Artifactory exports and three interactive
-# aliases, none of which anything here reads -- and aliases do not expand in a
-# non-interactive script regardless.
-#
-# So this now matches `daily`, which never sourced it: both take ~/.functions and
-# ~/.path, nothing more.
-
 # jwm_update_tools appends to this; the caller owns resetting it, the same way
 # daily owns resetting GS_FAILURES.
 UPDATE_FAILURES=()
-
-# ------------------------------------------------------- unattended chores ---
-# brew update/upgrade, uv python upgrade, rustup update, then both cache
-# refreshes. The return status is ignored on purpose: UPDATE_FAILURES carries
-# which step failed, which is strictly more than a yes/no.
-#
-# Fatal if it is missing rather than merely noted, because it is nearly the whole
-# script -- carrying on would run two sudo steps and print `update: OK` having
-# upgraded nothing. That happens if dotfiles is behind: ~/.functions comes from
-# jwm-dotfiles-2024, and this script comes from jwm-bin.
 if ! declare -F jwm_update_tools > /dev/null; then
     printf 'update: jwm_update_tools is not defined in ~/.functions.\n' >&2
     printf '        jwm-dotfiles-2024 is behind; pull it and run `just install` there.\n' >&2
@@ -57,14 +21,7 @@ fi
 
 jwm_update_tools
 
-# --------------------------------------------------------- needs a terminal ---
-# Everything below wants sudo. That is precisely why it is here rather than in
-# jwm_update_tools -- see the header.
-#
-# softwareupdate used to run first, when this was an alias. It runs last now
-# because grouping the sudo steps together is what makes the daily/update split
-# legible, and it is independent of the brew/rustup/uv chain above, so the order
-# carries no meaning either way.
+# needs a terminal
 if jwm_host_p; then
     sudo softwareupdate -i -a || UPDATE_FAILURES+=(softwareupdate)
 fi
