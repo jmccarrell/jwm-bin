@@ -36,8 +36,14 @@ fi
 printf '\n===== daily %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
 # Load the host predicates and the gs_* / git_sync functions, plus the real PATH
-# (brew git, asdf, rustup, ...). jwm_set_path uses bash-4+ associative arrays,
-# hence the Homebrew bash shebang above.
+# (brew git, mise shims, rustup, ...). jwm_set_path uses bash-4+ associative
+# arrays, hence the Homebrew bash shebang above.
+#
+# mise *shims* specifically, not `mise activate`. Activation is wired into
+# ~/.bash_profile, which this script never sources -- so the shims are the only
+# way node and terraform reach an unattended run. That is the whole reason
+# ~/.path keeps a mise_shims() entry alongside activation; drop it believing
+# activation covers everything and this job loses both tools silently.
 source "${HOME}/.functions"
 source "${HOME}/.path"
 jwm_set_path
