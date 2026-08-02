@@ -60,31 +60,37 @@ export HOMEBREW_NO_ENV_HINTS=1
 # ---------------------------------------------------------------- common -----
 gs_common
 
-# Install the dotfiles seed, immediately after the sync that motivates it.
+# Install both seed repos, immediately after the sync that motivates them.
 #
-# gs_dotfiles only pulls. Nothing linked the result, so a file added to the repo
-# sat in it doing nothing until someone ran `just install` by hand -- which is
-# how jwm-dotfiles-2024#31 shipped .config/uv/uv.toml and it stayed unlinked.
-# The repo stows with --no-folding, one symlink per file, so a new file genuinely
-# requires a new link.
+# gs_common only pulls. Nothing linked the result, so a file added to either repo
+# sat there doing nothing until someone ran `just install` by hand -- which is how
+# jwm-dotfiles-2024#31 shipped .config/uv/uv.toml and it stayed unlinked, and how
+# jwm-bin#11 shipped bin/update the same way. Both repos stow with --no-folding,
+# one symlink per file, so a new file genuinely requires a new link.
 #
-# jwm-bin needs the same treatment now and does not get it here. ~/bin used to be
-# a single folded dir symlink into jwm-bin/bin, which picked up new scripts for
-# free -- but that made stow's target and package the same directory, so the -R
-# added in jwm-bin#10 unstowed the repo's own scripts and deleted all eight. ~/bin
-# is a real dir with per-file symlinks now, which fixes that permanently and
-# costs this: a script added to jwm-bin needs `just install` there before it is on
-# PATH. Not automated here yet -- deliberately, since jwm-bin's install is what
-# caused that incident, and it deserves its own change rather than a ride-along.
-#
-# `just install` restows (-R) rather than stows, so this also removes the
-# dangling symlink a file DELETED from the repo would otherwise leave behind --
-# see jwm-dotfiles-2024#34. Unconditional rather than gated on the repo having
-# changed: it is 24ms, silent on a healthy tree, and exact where a HEAD
-# comparison would miss an uncommitted file or a hand-broken link. On a conflict
-# it aborts without touching anything and exits 1, which lands here.
+# `just install` restows (-R) rather than stows, so this also removes the dangling
+# symlink a file DELETED from a repo would otherwise leave behind -- see
+# jwm-dotfiles-2024#34. Unconditional rather than gated on the repo having changed:
+# it is 24ms, silent on a healthy tree, and exact where a HEAD comparison would
+# miss an uncommitted file or a hand-broken link. On a conflict it aborts without
+# touching anything and exits 1, which lands here.
 ( cd "$(jwm_dir)/proj/jwm-dotfiles-2024" && just install ) \
             || DAILY_FAILURES+=(dotfiles-install)
+
+# jwm-bin restows itself, which is safe for a reason worth writing down: bash
+# holds an open descriptor on the inode it is executing, and stow only replaces
+# the ~/bin/daily *symlink*. Even a `git pull` that swaps bin/daily underneath
+# writes a new inode and renames over it, so this process keeps reading the
+# content it started with and the new version takes effect next run.
+#
+# One piece of history that has to stay true for this to be safe: ~/bin must be a
+# real directory, not a symlink into jwm-bin/bin. It was the latter here, from
+# before this repo used stow -- which made stow's target and package the same
+# directory, so the -R added in #10 unstowed the package dir itself and deleted
+# all eight scripts. Both macs have a real ~/bin with per-file symlinks now, which
+# is the condition this line depends on.
+( cd "$(jwm_dir)/proj/jwm-bin" && just install ) \
+            || DAILY_FAILURES+=(jwm-bin-install)
 
 # ------------------------------------------------------------- jwm_host_p ----
 if jwm_host_p; then
