@@ -1,8 +1,15 @@
 #!/opt/homebrew/bin/bash
 # daily -- every-morning maintenance, driven by the org.mccarrell.daily
 # LaunchAgent (see ../Library/LaunchAgents/org.mccarrell.daily.plist). Safe to
-# run by hand as well. Today it just syncs every git repo via gs_all; add more
-# morning chores here over time.
+# run by hand as well.
+#
+# The same script runs on both macs. Work is organised into three sections --
+# common, then jwm_host_p, then mark43_host_p -- so a chore that belongs to only
+# one machine sits in that machine's block instead of being guarded inline. The
+# host predicates and the gs_* repo groups both come from ~/.functions.
+#
+# Nothing here aborts on failure: every step runs, failures are collected, and
+# one notification at the end names all of them.
 
 set -u
 
@@ -21,22 +28,59 @@ fi
 
 printf '\n===== daily %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
-# Load what gs_all needs: the gs_* / git_sync functions, plus the real PATH
-# (brew git, asdf, ...). jwm_set_path uses bash-4+ associative arrays, hence the
-# Homebrew bash shebang above.
+# Load the host predicates and the gs_* / git_sync functions, plus the real PATH
+# (brew git, asdf, rustup, ...). jwm_set_path uses bash-4+ associative arrays,
+# hence the Homebrew bash shebang above.
 source "${HOME}/.functions"
 source "${HOME}/.path"
 jwm_set_path
 
-gs_all
-status=$?
+# GS_FAILURES collects repo labels from the gs_* groups, DAILY_FAILURES the
+# chores below. The gs_* groups append without resetting, so we reset here.
+GS_FAILURES=()
+DAILY_FAILURES=()
 
-if (( status != 0 )); then
-    failures="${GS_ALL_FAILURES[*]:-unknown}"
-    printf 'daily: FAILED syncing: %s\n' "${failures}"
-    osascript -e "display notification \"Failed: ${failures}. See ~/Library/Logs/daily.log\" with title \"daily sync failed\"" >/dev/null 2>&1 || true
-else
-    printf 'daily: OK\n'
+# Nobody reads a hint banner in a log file.
+export HOMEBREW_NO_ENV_HINTS=1
+
+# Tools are not probed with `command -v` before use. Both macs have all of
+# these, so a missing one is a fault worth hearing about -- and a skip-if-absent
+# guard would have quietly hidden rustup being off the launchd PATH entirely.
+
+# ---------------------------------------------------------------- common -----
+gs_common
+
+rustup update || DAILY_FAILURES+=(rustup)
+
+# ------------------------------------------------------------- jwm_host_p ----
+if jwm_host_p; then
+    gs_jwm_host
+
+    brew update           || DAILY_FAILURES+=(brew-update)
+    brew upgrade --no-ask || DAILY_FAILURES+=(brew-upgrade)
 fi
 
-exit "${status}"
+# ---------------------------------------------------------- mark43_host_p ----
+if mark43_host_p; then
+    gs_mark43_host
+
+    # Workbrew machine: casks are disallowed by the workspace policy
+    # (/opt/workbrew/var/workbrew.env.json), and a cask upgrade is also the case
+    # most likely to want a prompt -- which launchd cannot answer. So formulae
+    # only. NO_AUTO_UPDATE stops upgrade re-running the update we just did.
+    brew update || DAILY_FAILURES+=(brew-update)
+    HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --formula \
+                || DAILY_FAILURES+=(brew-upgrade)
+fi
+
+# ---------------------------------------------------------------- report -----
+failures=( "${GS_FAILURES[@]}" "${DAILY_FAILURES[@]}" )
+
+if (( ${#failures[@]} != 0 )); then
+    printf 'daily: FAILED: %s\n' "${failures[*]}"
+    osascript -e "display notification \"Failed: ${failures[*]}. See ~/Library/Logs/daily.log\" with title \"daily failed\"" >/dev/null 2>&1 || true
+    exit 1
+fi
+
+printf 'daily: OK\n'
+exit 0
