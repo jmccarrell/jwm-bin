@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/bash
-# daily -- weekday-morning maintenance, driven by the org.mccarrell.daily
+# daily -- every-morning maintenance, driven by the org.mccarrell.daily
 # LaunchAgent (see ../Library/LaunchAgents/org.mccarrell.daily.plist). Safe to
 # run by hand as well. Today it just syncs every git repo via gs_all; add more
 # morning chores here over time.
