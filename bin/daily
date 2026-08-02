@@ -73,6 +73,21 @@ if mark43_host_p; then
                 || DAILY_FAILURES+=(brew-upgrade)
 fi
 
+# ------------------------------------------------------- after the upgrade ---
+# Chores that only a brew upgrade invalidates, so they belong after both host
+# blocks above rather than in either one.
+#
+# Re-link the Homebrew pythons into ~/.pyenv/versions. A new brew python is the
+# only thing that makes those links stale, and `brew upgrade` is the only place
+# a new one arrives -- so this is the causally correct trigger. It used to run
+# from ~/.bash_profile via jwm_set_path, where it cost ~0.7s of the ~1.4s spent
+# starting every login shell (12 `python3 -c` version probes plus ~200 `ln`
+# calls), i.e. a once-a-day chore billed to every new terminal tab. The
+# interactive `update` alias calls it for the same reason.
+#
+# Defined in ~/.path, already sourced above.
+jwm_pyenv_link_homebrew_pythons || DAILY_FAILURES+=(pyenv-link)
+
 # ---------------------------------------------------------------- report -----
 failures=( "${GS_FAILURES[@]}" "${DAILY_FAILURES[@]}" )
 
