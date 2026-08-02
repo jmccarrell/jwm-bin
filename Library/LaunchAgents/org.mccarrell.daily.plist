@@ -16,37 +16,15 @@
         <string>exec "$HOME/bin/daily"</string>
     </array>
 
-    <!-- Weekdays (Mon=1 .. Fri=5) at 08:45 local time. If the mac is asleep at
-         08:45, launchd runs the job once on the next wake; it is skipped only
-         when logged out. -->
+    <!-- Every day at 08:45 local time. Omitting Weekday is what makes it every
+         day: launchd matches on the keys present, so Hour + Minute alone fire
+         daily. If the mac is asleep at 08:45, launchd runs the job once on the
+         next wake; it is skipped only when logged out. -->
     <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Weekday</key><integer>1</integer>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>45</integer>
-        </dict>
-        <dict>
-            <key>Weekday</key><integer>2</integer>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>45</integer>
-        </dict>
-        <dict>
-            <key>Weekday</key><integer>3</integer>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>45</integer>
-        </dict>
-        <dict>
-            <key>Weekday</key><integer>4</integer>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>45</integer>
-        </dict>
-        <dict>
-            <key>Weekday</key><integer>5</integer>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>45</integer>
-        </dict>
-    </array>
+    <dict>
+        <key>Hour</key><integer>8</integer>
+        <key>Minute</key><integer>45</integer>
+    </dict>
 
     <!-- The script owns its own log (~/Library/Logs/daily.log). Only very early
          failures -- before the script sets up redirection -- land here. /tmp is
