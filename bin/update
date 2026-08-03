@@ -34,7 +34,7 @@ if mark43_host_p; then
     #
     # No softwareupdate on this mac: Intune manages OS updates here.
     quarantine_targets=()
-    for target in "$(command -v claude)" "$(command -v codex)" \
+    for target in "$(command -v claude)" \
                   /Applications/Ghostty.app /Applications/Emacs.app; do
         [ -n "$target" ] && [ -e "$target" ] && quarantine_targets+=( "$target" )
     done
