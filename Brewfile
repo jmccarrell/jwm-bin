@@ -1,7 +1,9 @@
 # Common Brewfile — every mac. Read via `brew bundle --file`; never stowed.
 #
-# Two tiers, kept apart because they are re-derived by different rules. Adding an
-# entry to the wrong one makes it unclear later why it is here at all.
+# Three tiers, kept apart because each is re-derived by a different rule and the
+# last cannot be re-derived at all. Put an entry in the wrong one and the next
+# person re-deriving that tier will either keep something unwanted or delete
+# something chosen.
 #
 # rustup belongs in the first tier and cannot be expressed: jwm_update_tools runs
 # `rustup update` unguarded, but rustup comes from rustup.rs, not Homebrew.
