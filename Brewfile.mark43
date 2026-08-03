@@ -22,7 +22,6 @@ brew "awscli"
 brew "azcopy"
 # Microsoft Azure CLI 2.0
 brew "azure-cli"
-# Bourne-Again SHell, a UNIX command interpreter
 # Programmable completion for Bash 4.2+
 brew "bash-completion@2"
 # Testing and linting Helm charts
@@ -49,7 +48,6 @@ brew "findutils"
 brew "fzf"
 # GitHub command-line tool
 brew "gh"
-# Distributed revision control system
 # GNU version of the tar archiving utility
 brew "gnu-tar"
 # GNU Privacy Guard (OpenPGP)
@@ -70,7 +68,6 @@ brew "istioctl"
 brew "jfrog-cli"
 # Lightweight and flexible command-line JSON processor
 brew "jq"
-# Handy way to save and run project-specific commands
 # Kubernetes CLI To Manage Your Clusters In Style!
 brew "k9s"
 # Package manager for kubectl plugins
@@ -105,7 +102,6 @@ brew "skopeo"
 brew "starship"
 # Tail multiple Kubernetes pods & their containers
 brew "stern"
-# Organize software neatly under a single directory tree (e.g. /usr/local)
 # User interface to the TELNET protocol
 brew "telnet"
 # Tool to generate documentation from Terraform modules
@@ -120,7 +116,6 @@ brew "tfsec"
 brew "tmux"
 # Display directories as trees (with optional color/HTML output)
 brew "tree"
-# Extremely fast Python package installer and resolver, written in Rust
 # Executes a program periodically, showing output fullscreen
 brew "watch"
 # Internet file retriever
