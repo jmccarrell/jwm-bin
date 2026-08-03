@@ -35,3 +35,21 @@ brew "tree"
 brew "worktrunk"
 brew "yazi"
 brew "zoxide"
+
+# Tier 3 — wanted on both macs, and named by nothing. No config file invokes
+# these, so unlike the tiers above they cannot be re-derived: they are here by
+# decision, and only a decision removes them. Do not prune one for looking
+# unreferenced.
+brew "coreutils"
+brew "crane"
+brew "entr"
+brew "gnupg"
+brew "hadolint"
+brew "helm"
+brew "jq"
+brew "skopeo"
+brew "tmux"
+brew "watch"
+brew "wget"
+brew "yamllint"
+brew "yq"
