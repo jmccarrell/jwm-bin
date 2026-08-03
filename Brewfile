@@ -1,12 +1,4 @@
 # Common Brewfile — every mac. Read via `brew bundle --file`; never stowed.
-#
-# Two things this file cannot tell you on its own:
-#
-#   - rustup belongs here and cannot be expressed. jwm_update_tools runs
-#     `rustup update` unguarded, but rustup comes from rustup.rs, not Homebrew.
-#   - bash is here because bin/daily and bin/update are `#!/opt/homebrew/bin/bash`.
-#     It is a dependency of other formulae rather than a leaf, so anything
-#     regenerating this list from `brew leaves` will drop it.
 
 brew "ack"
 brew "bash"
