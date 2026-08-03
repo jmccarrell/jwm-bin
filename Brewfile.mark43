@@ -1,17 +1,11 @@
-# Mark43 work mac — gated by mark43_host_p (~/code/dev43).
-# Read via `brew bundle --file`; never stowed.
+# Mark43 work mac — gated by mark43_host_p (~/code/dev43); never stowed.
+# Anything true of both macs belongs in ./Brewfile instead.
 #
-# Anything also true of the personal mac belongs in ./Brewfile, not here.
+# Regenerate: `brew bundle dump --no-describe`, then subtract ./Brewfile.
+# Not from `brew leaves` — it omits formulae installed only as dependencies.
 #
-# Regenerate with `brew bundle dump --no-describe`, then subtract ./Brewfile.
-# Never from `brew leaves`, which omits anything installed only as a dependency.
-# Without --no-describe every entry gains a description comment: the file roughly
-# doubles, and subtracting an entry strands its description above the next one.
-#
-# The casks are recorded but cannot be acted on here: Workbrew policy is
-# "allowedCasks": [] (/opt/workbrew/var/workbrew.env.json), which is why
-# jwm_update_tools already upgrades --formula on this host. They are listed so
-# this file can provision a replacement mac.
+# Casks are listed but cannot be installed here: Workbrew sets "allowedCasks": [].
+# They are recorded so this file can provision a replacement mac.
 
 tap "argoproj/tap", trusted: true
 tap "datadog-labs/pack", trusted: true
