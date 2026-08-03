@@ -3,191 +3,104 @@
 #
 # Anything also true of the work mac belongs in ./Brewfile, not here.
 #
-# Regenerate with `brew bundle dump`, then subtract ./Brewfile. Never from
-# `brew leaves`, which omits anything installed only as a dependency.
+# Regenerate with `brew bundle dump --no-describe`, then subtract ./Brewfile.
+# Never from `brew leaves`, which omits anything installed only as a dependency.
+# Without --no-describe every entry gains a description comment: the file roughly
+# doubles, and subtracting an entry strands its description above the next one.
 
 tap "fluxcd/tap", trusted: true
 tap "homebrew/services"
 tap "mistertea/et", "https://github.com/MisterTea/homebrew-et", trusted: true
 tap "siderolabs/tap", trusted: true
-# Search tool like grep, but optimized for programmers
 brew "ack"
-# Simple, modern, secure file encryption
 brew "age"
-# Spell checker with better logic than ispell
 brew "aspell"
-# Cryptography and SSL/TLS Toolkit
 brew "openssl@3"
-# Library for command-line editing
 brew "readline"
-# Command-line interface for SQLite
 brew "sqlite"
-# General-purpose data compression with high compression ratio
 brew "xz"
-# Official Amazon AWS command-line interface
 brew "awscli"
-# Microsoft Azure CLI 2.0
 brew "azure-cli"
-# Programmable completion for Bash 4.2+
 brew "bash-completion@2"
-# CLI to install, manage & troubleshoot Kubernetes clusters running Cilium
 brew "cilium-cli"
-# Cross-platform make
 brew "cmake"
-# GNU File, Shell, and Text utilities
 brew "coreutils"
-# Tool for interacting with remote images and registries
 brew "crane"
-# Load/unload environment variables based on $PWD
 brew "direnv"
-# Run arbitrary commands when files change
 brew "entr"
-# Scriptable ping program for checking if multiple hosts are up
 brew "fping"
-# Command-line fuzzy finder written in Go
 brew "fzf"
-# GNU awk utility
 brew "gawk"
-# Open-source, cross-platform JavaScript runtime environment
 brew "node"
-# Interact with Google Gemini AI models from the command-line
 brew "gemini-cli"
-# GitHub command-line tool
 brew "gh"
-# GNU Transport Layer Security (TLS) Library
 brew "gnutls"
-# Open source programming language to build simple/reliable/efficient software
 brew "go"
-# Language server for the Go language
 brew "gopls"
-# GNU grep, egrep and fgrep
 brew "grep"
-# Smarter Dockerfile linter to validate best practices
 brew "hadolint"
-# Kubernetes package manager
 brew "helm"
-# Agent multiplexer that lives in your terminal
 brew "herdr"
-# C/C++ and Java libraries for Unicode and globalization
 brew "icu4c@76"
-# Lightweight and flexible command-line JSON processor
 brew "jq"
-# Kubernetes CLI To Manage Your Clusters In Style!
 brew "k9s"
-# CloudNativePG plugin for kubectl
 brew "kubectl-cnpg"
-# Tool that can switch between kubectl contexts easily and create aliases
 brew "kubectx"
-# Kubernetes command-line interface
 brew "kubernetes-cli"
-# Postgres C API library
 brew "libpq"
-# Utility for directing compilation
 brew "make"
-# Polyglot runtime manager (asdf rust clone)
 brew "mise"
-# Create, run, and share large language models (LLMs)
 brew "ollama", restart_service: :changed
-# Drop-in replacement for Terraform. Infrastructure as Code Tool
 brew "opentofu"
-# 7-Zip (high compression file archiver) implementation
 brew "p7zip"
-# Swiss-army knife of markup format conversion
 brew "pandoc"
-# Highly capable, feature-rich programming language
 brew "perl"
-# Python dependency management tool
 brew "pipenv"
-# Execute binaries from Python packages in isolated environments
 brew "pipx"
-# Package compiler and linker metadata toolkit
 brew "pkgconf"
-# Python package management tool
 brew "poetry"
-# PDF rendering library (based on the xpdf-3.0 code base)
 brew "poppler"
-# Pretty, minimal and fast ZSH prompt
 brew "pure"
-# Tools for and transforming and inspecting PDF files
 brew "qpdf"
-# Rsync for cloud storage
 brew "rclone"
-# Search tool like grep and The Silver Searcher
 brew "ripgrep"
-# Extremely fast Python linter, written in Rust
 brew "ruff"
-# Static analysis and lint tool, for (ba)sh scripts
 brew "shellcheck"
-# Work with remote images registries
 brew "skopeo"
-# SMART hard drive monitoring
 brew "smartmontools"
-# Editor of encrypted files
 brew "sops"
-# Cross-shell prompt for astronauts
 brew "starship"
-# Tool Command Language
 brew "tcl-tk"
-# Command-line tool to interact with Gitea servers
 brew "tea"
-# Code-search similar to ack
 brew "the_silver_searcher"
-# Terminal multiplexer
 brew "tmux"
-# Display directories as trees (with optional color/HTML output)
 brew "tree"
-# Incremental parsing library
 brew "tree-sitter"
-# Parser generator tool
 brew "tree-sitter-cli"
-# Executes a program periodically, showing output fullscreen
 brew "watch"
-# Internet file retriever
 brew "wget"
-# CLI for Git worktree management, designed for parallel AI agent workflows
 brew "worktrunk"
-# Linter for YAML files
 brew "yamllint"
-# Blazing fast terminal file manager written in Rust, based on async I/O
 brew "yazi"
-# Process YAML, JSON, XML, CSV and properties documents from the CLI
 brew "yq"
-# General-purpose lossless data-compression library
 brew "zlib"
-# Shell extension to navigate your filesystem faster
 brew "zoxide"
-# UNIX shell (command interpreter)
 brew "zsh"
-# Flux CLI
 brew "fluxcd/tap/flux", trusted: true
-# CLI for out-of-band management of Kubernetes nodes created by Talos
 brew "siderolabs/tap/talosctl", trusted: true
-# Command-line interface for 1Password
 cask "1password-cli"
-# Open source IDE for exploring and testing APIs
 cask "bruno"
-# Anthropic's official Claude AI desktop app
 cask "claude"
-# Terminal-based AI coding assistant
 cask "claude-code"
-# GNU Emacs text editor
 cask "emacs-app"
 cask "font-fira-code-nerd-font"
-# Set of tools to manage resources and applications hosted on Google Cloud
 cask "gcloud-cli"
-# Terminal emulator that uses platform-native UI and GPU acceleration
 cask "ghostty"
-# Replacement for Docker Desktop
 cask "orbstack"
-# GUI client for PostgreSQL databases
 cask "postico"
-# Move and resize windows using keyboard shortcuts or snap areas
 cask "rectangle"
-# Markdown knowledgebase manager
 cask "tolaria"
-# Binary releases of VS Code without MS branding/telemetry/licensing
 cask "vscodium"
-# Multiplayer code editor
 cask "zed"
 vscode "bierner.markdown-mermaid"
 vscode "charliermarsh.ruff"
