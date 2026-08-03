@@ -36,3 +36,6 @@ brew "yamllint"
 brew "yazi"
 brew "yq"
 brew "zoxide"
+
+uv "ruff"
+uv "ty"
