@@ -3,9 +3,6 @@
 #
 # Regenerate: `brew bundle dump --no-describe`, then subtract ./Brewfile.
 # Not from `brew leaves` — it omits formulae installed only as dependencies.
-#
-# Casks are listed but cannot be installed here: Workbrew sets "allowedCasks": [].
-# They are recorded so this file can provision a replacement mac.
 
 tap "argoproj/tap", trusted: true
 tap "datadog-labs/pack", trusted: true
