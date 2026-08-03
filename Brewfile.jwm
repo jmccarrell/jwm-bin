@@ -1,0 +1,8 @@
+# Personal mac (lyra) — gated by jwm_host_p (~/pdata).
+# Read via `brew bundle --file`; never stowed.
+#
+# Anything also true of the work mac belongs in ./Brewfile, not here.
+#
+# Empty: lyra's installed set is not visible from the work mac, so this file is
+# the one part of the pair that cannot be written here. Fill it from
+# `brew bundle dump` on lyra — not `brew leaves`, which omits bash.

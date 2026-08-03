@@ -1,0 +1,153 @@
+# Mark43 work mac — gated by mark43_host_p (~/code/dev43).
+# Read via `brew bundle --file`; never stowed.
+#
+# Anything also true of the personal mac belongs in ./Brewfile, not here.
+#
+# The casks are recorded but cannot be acted on here: Workbrew policy is
+# "allowedCasks": [] (/opt/workbrew/var/workbrew.env.json), which is why
+# jwm_update_tools already upgrades --formula on this host. They are listed so
+# this file can provision a replacement mac.
+
+tap "argoproj/tap", trusted: true
+tap "datadog-labs/pack", trusted: true
+# Search tool like grep, but optimized for programmers
+brew "ack"
+# GitOps Continuous Delivery for Kubernetes
+brew "argocd"
+# Securely store and access AWS credentials in development environments
+brew "aws-vault"
+# Official Amazon AWS command-line interface
+brew "awscli"
+# Azure Storage data transfer utility
+brew "azcopy"
+# Microsoft Azure CLI 2.0
+brew "azure-cli"
+# Bourne-Again SHell, a UNIX command interpreter
+# Programmable completion for Bash 4.2+
+brew "bash-completion@2"
+# Testing and linting Helm charts
+brew "chart-testing"
+# GNU File, Shell, and Text utilities
+brew "coreutils"
+# Container Signing
+brew "cosign"
+# Tool for interacting with remote images and registries
+brew "crane"
+# Top-like interface for container metrics
+brew "ctop"
+# Get a file from an HTTP, HTTPS or FTP server
+brew "curl"
+# Load/unload environment variables based on $PWD
+brew "direnv"
+# Tool for exploring each layer in a docker image
+brew "dive"
+# Run arbitrary commands when files change
+brew "entr"
+# Collection of GNU find, xargs, and locate
+brew "findutils"
+# Command-line fuzzy finder written in Go
+brew "fzf"
+# GitHub command-line tool
+brew "gh"
+# Distributed revision control system
+# GNU version of the tar archiving utility
+brew "gnu-tar"
+# GNU Privacy Guard (OpenPGP)
+brew "gnupg"
+# Open source programming language to build simple/reliable/efficient software
+brew "go"
+# GNU grep, egrep and fgrep
+brew "grep"
+# Smarter Dockerfile linter to validate best practices
+brew "hadolint"
+# Kubernetes package manager
+brew "helm"
+# Improved top (interactive process viewer)
+brew "htop"
+# Istio configuration command-line utility
+brew "istioctl"
+# Command-line interface for JFrog products
+brew "jfrog-cli"
+# Lightweight and flexible command-line JSON processor
+brew "jq"
+# Handy way to save and run project-specific commands
+# Kubernetes CLI To Manage Your Clusters In Style!
+brew "k9s"
+# Package manager for kubectl plugins
+brew "krew"
+# Kubernetes prompt info for bash and zsh
+brew "kube-ps1"
+# Tool that can switch between kubectl contexts easily and create aliases
+brew "kubectx"
+# LastPass command-line interface tool
+brew "lastpass-cli"
+# Polyglot runtime manager (asdf rust clone)
+brew "mise"
+# Open source relational database management system
+brew "mysql-client"
+# Create, run, and share large language models (LLMs)
+brew "ollama", restart_service: :changed
+# Shell command parallelization utility
+brew "parallel"
+# Framework for managing multi-language pre-commit hooks
+brew "pre-commit"
+# Password generator
+brew "pwgen"
+# Unified tool to manage your Rancher server
+brew "rancher-cli"
+# Persistent key-value database, with built-in net interface
+brew "redis"
+# Search tool like grep and The Silver Searcher
+brew "ripgrep"
+# Work with remote images registries
+brew "skopeo"
+# Cross-shell prompt for astronauts
+brew "starship"
+# Tail multiple Kubernetes pods & their containers
+brew "stern"
+# Organize software neatly under a single directory tree (e.g. /usr/local)
+# User interface to the TELNET protocol
+brew "telnet"
+# Tool to generate documentation from Terraform modules
+brew "terraform-docs"
+# Improve Terraform's plan output
+brew "terraform_landscape"
+# Linter for Terraform files
+brew "tflint"
+# Static analysis security scanner for your terraform code
+brew "tfsec"
+# Terminal multiplexer
+brew "tmux"
+# Display directories as trees (with optional color/HTML output)
+brew "tree"
+# Extremely fast Python package installer and resolver, written in Rust
+# Executes a program periodically, showing output fullscreen
+brew "watch"
+# Internet file retriever
+brew "wget"
+# CLI for Git worktree management, designed for parallel AI agent workflows
+brew "worktrunk"
+# Linter for YAML files
+brew "yamllint"
+# Blazing fast terminal file manager written in Rust, based on async I/O
+brew "yazi"
+# Tool for managing your YubiKey configuration
+brew "ykman"
+# Process YAML, JSON, XML, CSV and properties documents from the CLI
+brew "yq"
+# Shell extension to navigate your filesystem faster
+brew "zoxide"
+# Kubectl Argo Rollouts Plugin.
+brew "argoproj/tap/kubectl-argo-rollouts"
+# Go-based command-line wrapper for easy interaction with Datadog APIs
+brew "datadog-labs/pack/pup"
+# Terminal-based AI coding assistant
+cask "claude-code"
+# OpenAI's coding agent that runs in your terminal
+cask "codex"
+# GNU Emacs text editor
+cask "emacs-app"
+cask "font-fira-code-nerd-font"
+# Terminal emulator that uses platform-native UI and GPU acceleration
+cask "ghostty"
+go "golang.org/x/tools/cmd/goimports"
