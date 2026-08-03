@@ -1,0 +1,47 @@
+# Mark43 work mac — gated by mark43_host_p (~/code/dev43); never stowed.
+# Anything true of both macs belongs in ./Brewfile instead.
+#
+# Regenerate: `brew bundle dump --no-describe`, then subtract ./Brewfile.
+# Not from `brew leaves` — it omits formulae installed only as dependencies.
+
+tap "argoproj/tap", trusted: true
+tap "datadog-labs/pack", trusted: true
+brew "argocd"
+brew "aws-vault"
+brew "awscli"
+brew "azcopy"
+brew "azure-cli"
+brew "chart-testing"
+brew "cosign"
+brew "ctop"
+brew "curl"
+brew "dive"
+brew "findutils"
+brew "gnu-tar"
+brew "htop"
+brew "istioctl"
+brew "jfrog-cli"
+brew "krew"
+brew "kube-ps1"
+brew "lastpass-cli"
+brew "mysql-client"
+brew "ollama", restart_service: :changed
+brew "parallel"
+brew "pre-commit"
+brew "pwgen"
+brew "rancher-cli"
+brew "redis"
+brew "stern"
+brew "telnet"
+brew "terraform-docs"
+brew "terraform_landscape"
+brew "tflint"
+brew "tfsec"
+brew "ykman"
+brew "argoproj/tap/kubectl-argo-rollouts"
+brew "datadog-labs/pack/pup"
+cask "claude-code"
+cask "emacs-app"
+cask "font-fira-code-nerd-font"
+cask "ghostty"
+go "golang.org/x/tools/cmd/goimports"
