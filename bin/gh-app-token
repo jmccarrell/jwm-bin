@@ -1,0 +1,66 @@
+#!/opt/homebrew/bin/bash
+# gh-app-token -- print a 1-hour GitHub App installation token on stdout.
+#
+# Reads the App's credentials from the environment and writes nothing else, so
+# the caller decides where the key comes from -- a password manager on a laptop,
+# a mounted Secret in a cluster -- and this script never learns.
+#
+#   GH_APP_ID            the App's numeric id (not secret)
+#   GH_APP_PRIVATE_KEY   the .pem contents
+#   GH_APP_INSTALLATION  optional: installation id, or the account it is
+#                        installed on. Required only if the App has more than one.
+#
+# Use per command rather than exporting, so the ambient `gh` stays the human:
+#
+#   GH_TOKEN=$(gh-app-token) gh pr create ...
+#
+# The token authenticates as the App (`<slug>[bot]`), never as a user; GitHub
+# has no long-lived equivalent, so this runs again every hour.
+
+set -euo pipefail
+
+die() { printf '%s: %s\n' "${0##*/}" "$1" >&2; exit 1; }
+
+[[ -n ${GH_APP_ID:-} && -n ${GH_APP_PRIVATE_KEY:-} ]] || die \
+    'GH_APP_ID and GH_APP_PRIVATE_KEY must be set -- this machine has no GitHub App configured'
+
+for cmd in openssl curl jq; do
+    command -v "$cmd" >/dev/null || die "$cmd not found"
+done
+
+api='https://api.github.com'
+accept='Accept: application/vnd.github+json'
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# iat is backdated a minute: GitHub rejects a JWT whose iat is in its future, and
+# a laptop's clock drifts more than the API's tolerance. exp is capped at 10 min.
+now=$(date +%s)
+claims=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$GH_APP_ID")
+signing_input="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url).$(printf '%s' "$claims" | b64url)"
+
+# The key reaches openssl on a file descriptor, never a temp file on disk.
+signature=$(printf '%s' "$signing_input" \
+    | openssl dgst -sha256 -sign <(printf '%s\n' "$GH_APP_PRIVATE_KEY") -binary \
+    | b64url) || die 'signing failed -- is GH_APP_PRIVATE_KEY a valid RSA private key?'
+jwt="$signing_input.$signature"
+
+installations=$(curl -fsS -H "Authorization: Bearer $jwt" -H "$accept" "$api/app/installations") \
+    || die 'the App rejected its own JWT -- check GH_APP_ID matches the key'
+
+if [[ -n ${GH_APP_INSTALLATION:-} ]]; then
+    id=$(jq -r --arg sel "$GH_APP_INSTALLATION" \
+        'map(select((.id|tostring) == $sel or .account.login == $sel)) | .[0].id // empty' \
+        <<<"$installations")
+    [[ -n $id ]] || die "no installation matching '$GH_APP_INSTALLATION'"
+else
+    # Guessing which installation to act as would silently act on the wrong
+    # account, so demand a choice instead of taking the first.
+    count=$(jq 'length' <<<"$installations")
+    (( count == 1 )) || die "$count installations -- set GH_APP_INSTALLATION to $(
+        jq -r 'map(.account.login) | join(", ")' <<<"$installations")"
+    id=$(jq -r '.[0].id' <<<"$installations")
+fi
+
+curl -fsS -X POST -H "Authorization: Bearer $jwt" -H "$accept" \
+    "$api/app/installations/$id/access_tokens" | jq -er '.token'
