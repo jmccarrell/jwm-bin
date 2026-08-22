@@ -50,6 +50,11 @@ gs_common
 
 if jwm_host_p; then
     gs_jwm_host
+    # Gated with the sync, not with the other installs: gs_lab clones mcc-lab-bin
+    # only on this mac, so an unconditional install fails every morning on the
+    # work laptop. Runs after the sync so a script pulled just now gets stowed.
+    ( cd "$(jwm_dir)/proj/lab/mcc-lab-bin" && just install ) \
+                || DAILY_FAILURES+=(mcc-lab-bin-install)
 fi
 
 if mark43_host_p; then
