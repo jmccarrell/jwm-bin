@@ -5,7 +5,6 @@
 # Not from `brew leaves` — it omits formulae installed only as dependencies.
 
 tap "fluxcd/tap", trusted: true
-tap "homebrew/services"
 tap "mistertea/et", "https://github.com/MisterTea/homebrew-et", trusted: true
 tap "siderolabs/tap", trusted: true
 brew "age"
