@@ -31,6 +31,7 @@ brew "ollama", restart_service: :changed
 brew "opentofu"
 brew "p7zip"
 brew "pandoc"
+brew "pgformatter"
 brew "pkgconf"
 brew "poppler"
 brew "qpdf"
