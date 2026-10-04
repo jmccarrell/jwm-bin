@@ -3,20 +3,26 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""ibkr-transfers-to-pp -- turn IBKR Flex transfers into Portfolio Performance CSV imports.
+"""ibkr-flex-to-pp -- prepare IBKR Flex XML for import into Portfolio Performance.
 
-Portfolio Performance's IBKR Flex importer reads trades, cash transactions and
-corporate actions but skips the Transfer section without a word, so securities
-or cash moved in from another broker never arrive. This writes them as two
-files for its general CSV import (File > Import > CSV files):
+Portfolio Performance's IBKR Flex importer (checked at 0.88.0) gets two things
+wrong, silently: it skips the Transfer section, so securities or cash moved in
+from another broker never arrive; and it imports every corporate action once
+per level of detail IBKR writes (DETAIL, SUMMARY, sometimes CLOSED_LOT), so each
+split, spinoff and merger arrives twice. One run writes everything to import:
 
-    ibkr-transfers-to-pp ~/pdata/investing/incoming/ibkr/flex/*.xml --out <dir>
+    ibkr-flex-to-pp ~/pdata/investing/incoming/ibkr/flex/*.xml \\
+        --out ~/pdata/investing/incoming/ibkr/pp-import
 
-  <dir>/portfolio-transactions.csv   import as "Portfolio Transactions"
-      stock: Delivery (Inbound|Outbound) at the market value IBKR records
-      (positionAmount) on the transfer date
-  <dir>/account-transactions.csv     import as "Account Transactions"
-      cash: Deposit or Withdrawal of cashTransfer
+  <out>/<year>.xml                   import with the IBKR Flex importer
+      the Flex file unchanged except that only DETAIL corporate-action rows remain
+  <out>/portfolio-transactions.csv   CSV import as "Portfolio Transactions"
+      stock transfers: Delivery (Inbound|Outbound) at the market value IBKR
+      records (positionAmount) on the transfer date
+  <out>/account-transactions.csv     CSV import as "Account Transactions"
+      cash transfers: Deposit or Withdrawal of cashTransfer
+
+Import the CSVs first, so the Flex trades sell shares that already exist.
 
 Column headers are Portfolio Performance's own English names, so its CSV
 dialog maps them without help; dates are yyyy-MM-dd, amounts use a dot
@@ -27,7 +33,8 @@ A transfer between two of your own IBKR accounts becomes an outbound row on
 one and an inbound row on the other: it nets to zero across accounts but
 counts as money out of one account and into the other.
 
-Existing output files are left alone unless --force.
+--out must differ from every input's directory, so the originals cannot be
+overwritten; existing output files are left alone unless --force.
 """
 
 import argparse
@@ -48,7 +55,7 @@ CASH = {"IN": "Deposit", "OUT": "Withdrawal"}
 
 
 def die(msg: str) -> None:
-    print(f"ibkr-transfers-to-pp: {msg}", file=sys.stderr)
+    print(f"ibkr-flex-to-pp: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -76,8 +83,22 @@ def shares(raw: str | None, what: str) -> str:
     return format(amount(raw, what).normalize(), "f")
 
 
-def convert(path: Path, portfolio_rows: list, account_rows: list, counts: Counter) -> None:
-    root = ET.parse(path).getroot()
+def detail_only(root: ET.Element) -> tuple[int, int]:
+    """Drop every corporate-action row but DETAIL; return how many were kept and dropped."""
+    kept = dropped = 0
+    for parent in root.iter("CorporateActions"):
+        for row in list(parent):
+            if row.tag != "CorporateAction":
+                continue
+            if row.get("levelOfDetail") == "DETAIL":
+                kept += 1
+            else:
+                parent.remove(row)
+                dropped += 1
+    return kept, dropped
+
+
+def transfers(root: ET.Element, portfolio_rows: list, account_rows: list, counts: Counter) -> None:
     for statement in root.iter("FlexStatement"):
         for t in statement.iter("Transfer"):
             # Only TRANSFER rows are transfers; anything else would be a subtotal.
@@ -113,11 +134,17 @@ def convert(path: Path, portfolio_rows: list, account_rows: list, counts: Counte
                 counts[(account, DELIVERY[direction])] += 1
 
 
-def write(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None:
+def replace(dest: Path, body: bytes) -> None:
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(body)
+    tmp.replace(dest)
+
+
+def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None:
     if dest.exists() and not force:
         print(f"{dest} exists, skipped (--force to replace)")
         return
-    tmp = dest.with_suffix(".csv.part")
+    tmp = dest.with_name(dest.name + ".part")
     with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=columns)
         w.writeheader()
@@ -129,22 +156,38 @@ def write(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("xml", nargs="+", type=Path, help="Flex Query XML files")
-    ap.add_argument("--out", type=Path, default=Path.cwd(), help="directory for the CSV files")
-    ap.add_argument("--force", action="store_true", help="overwrite existing CSV files")
+    ap.add_argument("--out", type=Path, required=True, help="directory for the import files")
+    ap.add_argument("--force", action="store_true", help="overwrite existing output files")
     args = ap.parse_args()
+
+    out = args.out.resolve()
+    if any(src.resolve().parent == out for src in args.xml):
+        die(f"--out {args.out} holds an input file; choose another directory")
 
     portfolio_rows: list[dict] = []
     account_rows: list[dict] = []
     counts: Counter = Counter()
+    cleaned: list[tuple[Path, bytes, int, int]] = []
     for path in args.xml:
         try:
-            convert(path, portfolio_rows, account_rows, counts)
+            root = ET.parse(path).getroot()
+            transfers(root, portfolio_rows, account_rows, counts)
         except (ET.ParseError, ValueError) as e:
             die(f"{path}: {e}")
+        kept, dropped = detail_only(root)
+        body = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        cleaned.append((out / path.name, body, kept, dropped))
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    write(args.out / "portfolio-transactions.csv", PORTFOLIO_COLUMNS, portfolio_rows, args.force)
-    write(args.out / "account-transactions.csv", ACCOUNT_COLUMNS, account_rows, args.force)
+    # Nothing is written until every input has parsed and converted.
+    out.mkdir(parents=True, exist_ok=True)
+    for dest, body, kept, dropped in cleaned:
+        if dest.exists() and not args.force:
+            print(f"{dest} exists, skipped (--force to replace)")
+            continue
+        replace(dest, body)
+        print(f"wrote {dest} (corporate actions: kept {kept} DETAIL, dropped {dropped})")
+    write_csv(out / "portfolio-transactions.csv", PORTFOLIO_COLUMNS, portfolio_rows, args.force)
+    write_csv(out / "account-transactions.csv", ACCOUNT_COLUMNS, account_rows, args.force)
     for (account, kind), n in sorted(counts.items()):
         print(f"  {account:<16} {kind:<20} {n}")
 
