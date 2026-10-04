@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """ibkr-transfers-to-pp -- turn IBKR Flex transfers into Portfolio Performance CSV imports.
 
 Portfolio Performance's IBKR Flex importer reads trades, cash transactions and
