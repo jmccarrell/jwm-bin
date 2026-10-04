@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""ibkr-flex-fetch -- save an IBKR Flex Query's XML, one calendar year per file.
+
+Reads the Flex Web Service token from the environment and writes nothing else
+secret, so the caller decides where the token comes from:
+
+    IBKR_FLEX_TOKEN=$(op read 'op://<vault>/<item>/credential') \\
+        ibkr-flex-fetch <query-id> 2022 2023 --out ~/some/dir
+
+  IBKR_FLEX_TOKEN   the Flex Web Service token (Client Portal > Flex Queries >
+                    Flex Web Service Configuration). Never put it in argv.
+  IBKR_FLEX_URL     optional: service base URL, for testing against a stub.
+
+Each year becomes <out>/<year>.xml. A run covers at most 365 days, so one year is
+one request; the current year runs to yesterday. IBKR keeps Flex data for the four
+previous calendar years plus the current one, and answers an older range with an
+error rather than an empty file.
+
+An existing <year>.xml is left alone unless --force: a past year's data does not
+change, and an overwrite is the one way this script could lose a file.
+"""
+
+import argparse
+import datetime as dt
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from collections import Counter, deque
+from pathlib import Path
+
+BASE = os.environ.get(
+    "IBKR_FLEX_URL",
+    "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService",
+)
+# The service rejects requests without a User-Agent.
+HEADERS = {"User-Agent": "ibkr-flex-fetch/1"}
+# Error codes worth waiting out rather than failing on.
+IN_PROGRESS = "1019"
+RATE_LIMITED = "1018"
+POLL_SECONDS = 10
+POLL_LIMIT = 60
+# Elements worth counting in the summary; the rest are reference data.
+COUNTED = ("Trade", "CashTransaction", "CorporateAction", "Transfer", "OpenPosition")
+
+
+def die(msg: str) -> None:
+    print(f"ibkr-flex-fetch: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+class YearRefused(Exception):
+    """IBKR declined one year; the others still run."""
+
+
+class Client:
+    """Two GETs with IBKR's rate limit: 1 request per second, 10 per minute."""
+
+    def __init__(self, token: str):
+        self.token = token
+        self.sent: deque[float] = deque()
+
+    def _throttle(self) -> None:
+        now = time.monotonic()
+        while self.sent and now - self.sent[0] > 60:
+            self.sent.popleft()
+        if len(self.sent) >= 10:
+            time.sleep(60 - (now - self.sent[0]) + 0.5)
+        if self.sent:
+            time.sleep(max(0.0, 1.1 - (time.monotonic() - self.sent[-1])))
+        self.sent.append(time.monotonic())
+
+    def get(self, endpoint: str, **params: str) -> tuple[ET.Element, bytes]:
+        query = urllib.parse.urlencode({"t": self.token, "v": "3", **params})
+        req = urllib.request.Request(f"{BASE}/{endpoint}?{query}", headers=HEADERS)
+        while True:
+            self._throttle()
+            # Errors name the endpoint only: the URL carries the token.
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = resp.read()
+            except OSError as e:
+                die(f"{endpoint}: {e.__class__.__name__}: {getattr(e, 'reason', e)}")
+            try:
+                root = ET.fromstring(body)
+            except ET.ParseError:
+                die(f"{endpoint}: response is not XML")
+            if root.findtext("ErrorCode") == RATE_LIMITED:
+                time.sleep(60)
+                continue
+            return root, body
+
+
+def service_error(root: ET.Element) -> str:
+    return f"IBKR error {root.findtext('ErrorCode')}: {root.findtext('ErrorMessage')}"
+
+
+def fetch_year(client: Client, query_id: str, year: int) -> bytes:
+    start = dt.date(year, 1, 1)
+    end = min(dt.date(year, 12, 31), dt.date.today() - dt.timedelta(days=1))
+    if end < start:
+        raise YearRefused(f"{year}: nothing to fetch before today")
+    sent, _ = client.get(
+        "SendRequest", q=query_id, fd=start.strftime("%Y%m%d"), td=end.strftime("%Y%m%d")
+    )
+    if sent.findtext("Status") != "Success":
+        raise YearRefused(f"{year}: request refused -- {service_error(sent)}")
+    ref = sent.findtext("ReferenceCode")
+    for _ in range(POLL_LIMIT):
+        got, body = client.get("GetStatement", q=ref)
+        if got.tag == "FlexQueryResponse":
+            return body
+        if got.findtext("ErrorCode") != IN_PROGRESS:
+            raise YearRefused(f"{year}: statement refused -- {service_error(got)}")
+        time.sleep(POLL_SECONDS)
+    raise YearRefused(f"{year}: statement still generating after {POLL_LIMIT * POLL_SECONDS}s")
+
+
+def summarize(year: int, raw: bytes) -> list[str]:
+    """One line per account, and any way the file falls short of the year asked for."""
+    root = ET.fromstring(raw)
+    statements = root.findall(".//FlexStatement")
+    lines, problems = [], []
+    if not statements:
+        problems.append("no FlexStatement in the response")
+    for st in statements:
+        info = st.find("AccountInformation")
+        alias = (info.get("acctAlias") if info is not None else "") or ""
+        who = alias or st.get("accountId", "?")
+        counts = Counter(el.tag for el in st.iter() if el.tag in COUNTED)
+        lines.append(
+            f"  {who:<16} {st.get('fromDate')}..{st.get('toDate')}  "
+            + "  ".join(f"{tag} {counts[tag]}" for tag in COUNTED)
+        )
+        if not st.get("fromDate", "").startswith(str(year)):
+            problems.append(f"{who}: starts {st.get('fromDate')}, not in {year}")
+    return lines + [f"  PROBLEM: {p}" for p in problems]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("query_id", help="the Activity Flex Query's ID")
+    ap.add_argument("years", nargs="+", type=int, help="calendar years to fetch")
+    ap.add_argument("--out", type=Path, default=Path.cwd(), help="directory for <year>.xml")
+    ap.add_argument("--force", action="store_true", help="overwrite an existing <year>.xml")
+    args = ap.parse_args()
+
+    token = os.environ.get("IBKR_FLEX_TOKEN", "")
+    if not token:
+        die("IBKR_FLEX_TOKEN is not set")
+    args.out.mkdir(parents=True, exist_ok=True)
+    client = Client(token)
+    refused = 0
+
+    for year in args.years:
+        dest = args.out / f"{year}.xml"
+        if dest.exists() and not args.force:
+            print(f"{year}: {dest} exists, skipped (--force to replace)")
+            continue
+        try:
+            raw = fetch_year(client, args.query_id, year)
+        except YearRefused as e:
+            print(f"ibkr-flex-fetch: {e}", file=sys.stderr)
+            refused += 1
+            continue
+        tmp = dest.with_suffix(".xml.part")
+        tmp.write_bytes(raw)
+        tmp.replace(dest)
+        print(f"{year}: saved {dest} ({len(raw):,} bytes)")
+        print("\n".join(summarize(year, raw)))
+    sys.exit(1 if refused else 0)
+
+
+if __name__ == "__main__":
+    main()
