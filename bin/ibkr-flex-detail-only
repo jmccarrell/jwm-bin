@@ -1,0 +1,77 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""ibkr-flex-detail-only -- copy IBKR Flex XML keeping one row per corporate action.
+
+IBKR writes each corporate action at several levels of detail: DETAIL, SUMMARY,
+and sometimes CLOSED_LOT. Portfolio Performance's Flex importer (checked at
+0.88.0) skips summary rows for trades and cash transactions but not for
+corporate actions, so every split, spinoff and merger arrives twice. This
+writes copies with only the DETAIL corporate-action rows; nothing else changes.
+
+    ibkr-flex-detail-only ~/pdata/investing/incoming/ibkr/flex/*.xml \\
+        --out ~/pdata/investing/incoming/ibkr/flex-pp
+
+Import the copies, never the originals. --out must differ from every input's
+directory, so the originals cannot be overwritten; an existing copy is left
+alone unless --force.
+"""
+
+import argparse
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+
+def die(msg: str) -> None:
+    print(f"ibkr-flex-detail-only: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def clean(src: Path) -> tuple[bytes, int, int]:
+    """Return the cleaned file, how many corporate-action rows were dropped, and how many kept."""
+    tree = ET.parse(src)
+    dropped = kept = 0
+    for parent in tree.getroot().iter("CorporateActions"):
+        for row in list(parent):
+            if row.tag != "CorporateAction":
+                continue
+            if row.get("levelOfDetail") == "DETAIL":
+                kept += 1
+            else:
+                parent.remove(row)
+                dropped += 1
+    return ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=True), dropped, kept
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("xml", nargs="+", type=Path, help="Flex Query XML files")
+    ap.add_argument("--out", type=Path, required=True, help="directory for the cleaned copies")
+    ap.add_argument("--force", action="store_true", help="overwrite existing copies")
+    args = ap.parse_args()
+
+    out = args.out.resolve()
+    if any(src.resolve().parent == out for src in args.xml):
+        die(f"--out {args.out} holds an input file; choose another directory")
+    out.mkdir(parents=True, exist_ok=True)
+
+    for src in args.xml:
+        dest = out / src.name
+        if dest.exists() and not args.force:
+            print(f"{dest} exists, skipped (--force to replace)")
+            continue
+        try:
+            body, dropped, kept = clean(src)
+        except ET.ParseError as e:
+            die(f"{src}: {e}")
+        tmp = dest.with_suffix(".xml.part")
+        tmp.write_bytes(body)
+        tmp.replace(dest)
+        print(f"{src.name}: kept {kept} corporate-action rows, dropped {dropped}")
+
+
+if __name__ == "__main__":
+    main()
