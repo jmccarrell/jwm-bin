@@ -1,0 +1,200 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""pp-tiingo-prices -- write Tiingo daily closes into a Portfolio Performance file.
+
+For every security in the file, fetches Tiingo's end-of-day prices from its
+first transaction to yesterday and replaces the security's price history with
+them. Prices are Tiingo's `close`, the price actually quoted that day, not
+`adjClose`: Portfolio Performance holds real share counts and records splits
+itself. Each security's price source is set to manual and its separately
+fetched latest price is removed, so the app never mixes in another provider.
+
+    TIINGO_API_TOKEN=$(bao-read 'kv-invest/tiingo/tiingo-api-token#api_token') \\
+        pp-tiingo-prices ~/pdata/investing/portfolio-performance/ibkr.xml
+
+  TIINGO_API_TOKEN  Tiingo API token; never put it in argv.
+
+The file must be saved as "XML with id attributes" and must not be open in
+Portfolio Performance: the app would overwrite the change on its next save,
+so the script refuses to run while the app is running.
+
+Every transaction's price per share is compared with Tiingo's close that day;
+a gap over --tolerance is reported, since it usually means Tiingo's ticker
+names a different security. Nothing is written if any security fails to
+fetch, unless --partial. --dry-run fetches and checks without writing.
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+from decimal import Decimal
+from pathlib import Path
+
+TIINGO = "https://api.tiingo.com/tiingo/daily/{ticker}/prices?startDate={start}&endDate={end}"
+# Portfolio Performance stores quotes and shares as longs scaled by 10^8, amounts by 10^2.
+QUOTE = Decimal(10) ** 8
+SHARES = Decimal(10) ** 8
+AMOUNT = Decimal(100)
+PRICED_TYPES = {"BUY", "SELL", "DELIVERY_INBOUND", "DELIVERY_OUTBOUND"}
+MIN_CHECKED = Decimal(1)
+
+
+def die(msg: str) -> None:
+    print(f"pp-tiingo-prices: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+class NotFound(Exception):
+    pass
+
+
+def fetch(token: str, ticker: str, start: dt.date, end: dt.date) -> dict[str, Decimal]:
+    url = TIINGO.format(ticker=ticker, start=start, end=end)
+    req = urllib.request.Request(url, headers={"Authorization": f"Token {token}"})
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                rows = json.load(resp)
+            return {r["date"][:10]: Decimal(str(r["close"])) for r in rows if r.get("close") is not None}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise NotFound(ticker) from None
+            if e.code == 429 and attempt < 4:
+                time.sleep(60 * (attempt + 1))
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
+def app_running() -> bool:
+    return subprocess.run(["pgrep", "-x", "PortfolioPerformance"], capture_output=True).returncode == 0
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("file", type=Path, help="Portfolio Performance file, XML with id attributes")
+    ap.add_argument("--tolerance", type=Decimal, default=Decimal("0.10"),
+                    help="largest accepted gap between a trade price and the close (default 0.10)")
+    ap.add_argument("--dry-run", action="store_true", help="fetch and check, write nothing")
+    ap.add_argument("--partial", action="store_true", help="write even if some securities failed")
+    args = ap.parse_args()
+
+    token = os.environ.get("TIINGO_API_TOKEN", "")
+    if not token:
+        die("TIINGO_API_TOKEN is not set")
+    if not args.dry_run and app_running():
+        die("Portfolio Performance is running; quit it first, or it will overwrite this change")
+
+    tree = ET.parse(args.file)
+    root = tree.getroot()
+    if root.get("id") is None:
+        die(f"{args.file} is not saved as XML with id attributes")
+    ids = {e.get("id"): e for e in root.iter() if e.get("id")}
+
+    def deref(e: ET.Element) -> ET.Element:
+        return ids[e.get("reference")] if e.get("reference") else e
+
+    securities = [deref(s) for s in root.find("securities")]
+    first: dict[str, str] = {}
+    trades: dict[str, list[tuple[str, Decimal]]] = defaultdict(list)
+    for portfolio in root.find("portfolios"):
+        for t in deref(portfolio).find("transactions"):
+            t = deref(t)
+            uuid = deref(t.find("security")).findtext("uuid")
+            day = t.findtext("date")[:10]
+            first[uuid] = min(first.get(uuid, day), day)
+            shares = Decimal(t.findtext("shares")) / SHARES
+            value = Decimal(t.findtext("amount")) / AMOUNT
+            # Below a dollar the cent rounding swamps the price (fractional-share
+            # leftovers), and a zero-value delivery is a split, not a price.
+            if t.findtext("type") in PRICED_TYPES and shares and value >= MIN_CHECKED:
+                trades[uuid].append((day, value / shares))
+
+    end = dt.date.today() - dt.timedelta(days=1)
+    fetched: dict[str, dict[str, Decimal]] = {}
+    failed, mismatched = [], []
+    for s in securities:
+        uuid, ticker, name = s.findtext("uuid"), s.findtext("tickerSymbol"), s.findtext("name")
+        if uuid not in first:
+            print(f"  {ticker or name}: no transactions, left alone")
+            continue
+        if not ticker:
+            failed.append(f"{name}: no ticker symbol")
+            continue
+        try:
+            closes = fetch(token, ticker, dt.date.fromisoformat(first[uuid]), end)
+        except NotFound:
+            failed.append(f"{ticker} ({name}): Tiingo has no such ticker")
+            continue
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            failed.append(f"{ticker} ({name}): {e.__class__.__name__}: {e}")
+            continue
+        if not closes:
+            failed.append(f"{ticker} ({name}): Tiingo returned no prices from {first[uuid]}")
+            continue
+        for day, price in trades[uuid]:
+            close = closes.get(day)
+            if close and abs(price - close) / close > args.tolerance:
+                mismatched.append(f"{ticker} {day}: trade {price:.2f}, Tiingo close {close:.2f}")
+        fetched[uuid] = closes
+        print(f"  {ticker:<6} {len(closes):>5} prices {min(closes)}..{max(closes)}")
+
+    for line in mismatched:
+        print(f"CHECK: {line}")
+    for line in failed:
+        print(f"FAILED: {line}", file=sys.stderr)
+    if args.dry_run:
+        print("dry run: nothing written")
+        sys.exit(1 if failed or mismatched else 0)
+    if failed and not args.partial:
+        die("nothing written; fix the failures above or pass --partial")
+
+    for s in securities:
+        closes = fetched.get(s.findtext("uuid"))
+        if closes is None:
+            continue
+        for tag in ("latest", "latestFeed", "latestFeedURL", "feedURL"):
+            for el in s.findall(tag):
+                s.remove(el)
+        feed = s.find("feed")
+        if feed is None:
+            feed = ET.Element("feed")
+            s.insert(list(s).index(s.find("tickerSymbol")) + 1, feed)
+        feed.text = "MANUAL"
+        prices = s.find("prices")
+        if prices is None:
+            prices = ET.Element("prices")
+            s.insert(list(s).index(feed) + 1, prices)
+            prices.tail = feed.tail
+        # Match the file's indentation: feed.tail is a newline plus the sibling indent.
+        sibling = feed.tail or "\n"
+        tail = prices.tail
+        prices.clear()
+        prices.tail = tail
+        prices.text = sibling + "  "
+        for day in sorted(closes):
+            el = ET.SubElement(prices, "price", t=day, v=str(int(closes[day] * QUOTE)))
+            el.tail = sibling + "  "
+        if len(prices):
+            prices[-1].tail = sibling
+
+    tmp = args.file.with_name(args.file.name + ".part")
+    tree.write(tmp, encoding="utf-8", xml_declaration=False)
+    tmp.replace(args.file)
+    print(f"wrote {args.file}: {len(fetched)} securities priced from Tiingo")
+    sys.exit(1 if failed or mismatched else 0)
+
+
+if __name__ == "__main__":
+    main()
