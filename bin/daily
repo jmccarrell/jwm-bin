@@ -40,6 +40,27 @@ DAILY_FAILURES=()
 # Nobody reads a hint banner in a log file.
 export HOMEBREW_NO_ENV_HINTS=1
 
+# Homebrew's curl has no stall timeout, so one dead download holds the brew lock
+# forever. Abort a transfer under 1 KB/s for 60s; brew's own retries take it from
+# there. No --max-time: a big bottle on a slow link is not a stall.
+#
+# The file lives under /tmp, not $HOME: on a Workbrew mac curl runs as the
+# workbrew user, which cannot read the home directory. If setup fails, brew runs
+# without it -- a curlrc path curl cannot read fails every download.
+if curlrc_dir=$(mktemp -d /tmp/daily-curlrc.XXXXXX); then
+    trap 'rm -rf "${curlrc_dir}"' EXIT
+    if chmod 755 "${curlrc_dir}" &&
+           printf 'connect-timeout = 30\nspeed-limit = 1024\nspeed-time = 60\n' \
+                  > "${curlrc_dir}/curlrc" &&
+           chmod 644 "${curlrc_dir}/curlrc"; then
+        export HOMEBREW_CURLRC="${curlrc_dir}/curlrc"
+    else
+        DAILY_FAILURES+=(brew-curlrc)
+    fi
+else
+    DAILY_FAILURES+=(brew-curlrc)
+fi
+
 # Tools are not probed with `command -v` before use, here or in jwm_update_tools.
 # Both macs have all of them, so a missing one is a fault worth hearing about --
 gs_common
