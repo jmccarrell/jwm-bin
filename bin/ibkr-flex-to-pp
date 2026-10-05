@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""ibkr-flex-to-pp -- prepare IBKR Flex XML for import into Portfolio Performance.
+"""ibkr-flex-to-pp -- prepare IBKR records for import into Portfolio Performance.
 
 Portfolio Performance's IBKR Flex importer (checked at 0.88.0) gets two things
 wrong, silently: it skips the Transfer section, so securities or cash moved in
@@ -24,6 +24,24 @@ split, spinoff and merger arrives twice. One run writes everything to import:
 
 Import the CSVs first, so the Flex trades sell shares that already exist.
 
+A closed account has no Flex data: IBKR's Flex Queries cover open accounts
+only. Its Activity Statement CSVs (Client Portal > Statements, format CSV) go in
+the same way, and everything in them becomes CSV rows, since there is no Flex
+file to carry the trades:
+
+    ibkr-flex-to-pp ~/pdata/investing/incoming/ibkr/<account>/*_2021_2021.csv ... --out <dir>
+
+  Transfers (stocks)          Delivery (Inbound|Outbound) at Market Value
+  Trades (Order rows)         Buy or Sell, with commission as Fees
+  Corporate Actions           Delivery (Inbound|Outbound) of the shares, at Value
+  Deposits & Withdrawals      Deposit or Withdrawal
+  Dividends, Withholding Tax  Dividend, with the tax withheld that day as Taxes
+  Interest                    Interest
+
+Give statements whose periods do not overlap, such as the annual ones; the
+monthly statements repeat what the annual ones hold. Overlapping periods are
+refused rather than imported twice.
+
 Column headers are Portfolio Performance's own English names, so its CSV
 dialog maps them without help; dates are yyyy-MM-dd, amounts use a dot
 decimal. Account columns carry the IBKR account alias, and Portfolio
@@ -39,6 +57,8 @@ overwritten; existing output files are left alone unless --force.
 
 import argparse
 import csv
+import datetime as dt
+import re
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -46,10 +66,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 PORTFOLIO_COLUMNS = [
-    "Date", "Type", "Value", "Transaction Currency", "Shares", "ISIN",
-    "Ticker Symbol", "Security Name", "Securities Account", "Note",
+    "Date", "Time", "Type", "Value", "Transaction Currency", "Shares", "Fees", "ISIN",
+    "Ticker Symbol", "Security Name", "Securities Account", "Cash Account", "Note",
 ]
-ACCOUNT_COLUMNS = ["Date", "Type", "Value", "Transaction Currency", "Cash Account", "Note"]
+ACCOUNT_COLUMNS = [
+    "Date", "Type", "Value", "Transaction Currency", "Taxes", "ISIN", "Ticker Symbol",
+    "Security Name", "Cash Account", "Note",
+]
+# An ISIN inside a statement description, e.g. "NXPI(NL0009538784) Cash Dividend".
+ISIN = re.compile(r"\b([A-Z]{2}[A-Z0-9]{9}[0-9])\b")
 DELIVERY = {"IN": "Delivery (Inbound)", "OUT": "Delivery (Outbound)"}
 CASH = {"IN": "Deposit", "OUT": "Withdrawal"}
 
@@ -134,6 +159,139 @@ def transfers(root: ET.Element, portfolio_rows: list, account_rows: list, counts
                 counts[(account, DELIVERY[direction])] += 1
 
 
+def number(raw: str, what: str) -> Decimal:
+    # Statements write thousands separators: "14,978.04".
+    try:
+        return Decimal(raw.replace(",", ""))
+    except InvalidOperation:
+        raise ValueError(f"{what} is {raw!r}, not a number") from None
+
+
+def statement_period(rows: list[list[str]]) -> tuple[dt.date, dt.date]:
+    for r in rows:
+        if r[:3] == ["Statement", "Data", "Period"]:
+            start, _, end = r[3].partition(" - ")
+            parse = lambda d: dt.datetime.strptime(d.strip(), "%B %d, %Y").date()
+            return parse(start), parse(end or start)
+    raise ValueError("no Statement Period row; is this an IBKR Activity Statement CSV?")
+
+
+def statement(path: Path, portfolio_rows: list, account_rows: list, counts: Counter) -> tuple[dt.date, dt.date]:
+    """Convert one Activity Statement CSV; return the period it covers."""
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        rows = [r for r in csv.reader(f) if len(r) > 2]
+    period = statement_period(rows)
+    account = next((r[3] for r in rows if r[:3] == ["Account Information", "Data", "Account Alias"]), "")
+    if not account:
+        raise ValueError("no Account Alias in Account Information")
+
+    header: dict[str, list[str]] = {}
+    sections: dict[str, list[dict]] = {}
+    for r in rows:
+        if r[1] == "Header":
+            header[r[0]] = r[2:]
+        elif r[1] == "Data" and r[0] in header:
+            sections.setdefault(r[0], []).append(dict(zip(header[r[0]], r[2:])))
+    isin = {x["Symbol"]: x["Security ID"] for x in sections.get("Financial Instrument Information", [])}
+    name = {x["Symbol"]: x["Description"] for x in sections.get("Financial Instrument Information", [])}
+
+    def stock(symbol: str) -> dict:
+        return {"ISIN": isin.get(symbol, ""), "Ticker Symbol": symbol, "Security Name": name.get(symbol, "")}
+
+    def add(rows_: list, kind: str, row: dict) -> None:
+        rows_.append(row)
+        counts[(account, kind)] += 1
+
+    for x in sections.get("Transfers", []):
+        if x["Asset Category"] != "Stocks":
+            continue
+        kind = DELIVERY[x["Direction"].upper()]
+        add(portfolio_rows, kind, {
+            "Date": x["Date"], "Type": kind, "Transaction Currency": x["Currency"],
+            "Value": money(str(number(x["Market Value"], "Market Value")), "Market Value"),
+            "Shares": shares(str(number(x["Qty"], "Qty")), "Qty"), **stock(x["Symbol"]),
+            "Securities Account": account, "Note": f"IBKR {x['Type']} transfer {x['Direction']}",
+        })
+    for x in sections.get("Trades", []):
+        if x.get("DataDiscriminator") != "Order":
+            continue
+        qty = number(x["Quantity"], "Quantity")
+        proceeds = number(x["Proceeds"], "Proceeds")
+        fee = abs(number(x["Comm/Fee"], "Comm/Fee"))
+        kind = "Buy" if qty > 0 else "Sell"
+        # Value is what moved through cash: cost plus commission, or proceeds less it.
+        value = abs(proceeds) + fee if qty > 0 else proceeds - fee
+        day, _, time = x["Date/Time"].partition(",")
+        add(portfolio_rows, kind, {
+            "Date": day.strip(), "Time": time.strip()[:5], "Type": kind,
+            "Value": money(str(value), "trade value"), "Transaction Currency": x["Currency"],
+            "Shares": shares(str(qty), "Quantity"), "Fees": money(str(fee), "Comm/Fee"),
+            **stock(x["Symbol"]), "Securities Account": account, "Cash Account": account,
+            "Note": f"IBKR trade {x.get('Code', '')}".strip(),
+        })
+    for x in sections.get("Corporate Actions", []):
+        if x["Asset Category"] != "Stocks":
+            continue
+        # The security receiving or giving up shares is the last "(SYMBOL, NAME, ISIN)".
+        target = re.findall(r"\(([^,()]+), ([^()]+), ([A-Z0-9]{12})\)", x["Description"])
+        if not target:
+            raise ValueError(f"corporate action names no security: {x['Description']!r}")
+        symbol, sec_name, sec_isin = target[-1]
+        qty = number(x["Quantity"], "Quantity")
+        kind = DELIVERY["IN" if qty > 0 else "OUT"]
+        add(portfolio_rows, kind, {
+            "Date": x["Report Date"], "Type": kind, "Transaction Currency": x["Currency"],
+            "Value": money(str(number(x["Value"], "Value")), "Value"),
+            "Shares": shares(str(qty), "Quantity"), "ISIN": sec_isin, "Ticker Symbol": symbol,
+            "Security Name": sec_name, "Securities Account": account,
+            "Note": x["Description"][:120],
+        })
+    for x in sections.get("Deposits & Withdrawals", []):
+        if x["Currency"] == "Total" or not x.get("Amount"):
+            continue
+        value = number(x["Amount"], "Amount")
+        kind = CASH["IN" if value > 0 else "OUT"]
+        add(account_rows, kind, {
+            "Date": x["Settle Date"], "Type": kind, "Value": money(str(value), "Amount"),
+            "Transaction Currency": x["Currency"], "Cash Account": account, "Note": x["Description"],
+        })
+    # Withholding tax rides on the dividend paid the same day for the same security.
+    withheld: dict[tuple[str, str], Decimal] = Counter()
+    for x in sections.get("Withholding Tax", []):
+        if x["Currency"] == "Total" or not x.get("Amount"):
+            continue
+        m = ISIN.search(x["Description"])
+        withheld[(x["Date"], m.group(1) if m else "")] += abs(number(x["Amount"], "Amount"))
+    for x in sections.get("Dividends", []):
+        if x["Currency"] == "Total" or not x.get("Amount"):
+            continue
+        m = ISIN.search(x["Description"])
+        if not m:
+            raise ValueError(f"dividend names no ISIN: {x['Description']!r}")
+        gross = number(x["Amount"], "Amount")
+        tax = withheld.pop((x["Date"], m.group(1)), Decimal(0))
+        symbol = next((k for k, v in isin.items() if v == m.group(1)), "")
+        add(account_rows, "Dividend", {
+            "Date": x["Date"], "Type": "Dividend", "Value": money(str(gross - tax), "dividend"),
+            "Taxes": money(str(tax), "tax") if tax else "", "Transaction Currency": x["Currency"],
+            "ISIN": m.group(1), "Ticker Symbol": symbol, "Security Name": name.get(symbol, ""),
+            "Cash Account": account, "Note": x["Description"][:120],
+        })
+    for (day, sec_isin), tax in withheld.items():
+        if tax:
+            raise ValueError(f"withholding tax on {day} for {sec_isin or '?'} matches no dividend")
+    for x in sections.get("Interest", []):
+        if x["Currency"] == "Total" or not x.get("Amount"):
+            continue
+        value = number(x["Amount"], "Amount")
+        kind = "Interest" if value > 0 else "Interest Charge"
+        add(account_rows, kind, {
+            "Date": x["Date"], "Type": kind, "Value": money(str(value), "Amount"),
+            "Transaction Currency": x["Currency"], "Cash Account": account, "Note": x["Description"],
+        })
+    return period
+
+
 def replace(dest: Path, body: bytes) -> None:
     tmp = dest.with_name(dest.name + ".part")
     tmp.write_bytes(body)
@@ -148,27 +306,39 @@ def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> 
     with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=columns)
         w.writeheader()
-        w.writerows(sorted(rows, key=lambda r: (r["Date"], r["Note"])))
+        w.writerows(sorted(rows, key=lambda r: (r["Date"], r.get("Time", ""), r["Note"])))
     tmp.replace(dest)
     print(f"wrote {dest} ({len(rows)} rows)")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("xml", nargs="+", type=Path, help="Flex Query XML files")
+    ap.add_argument("inputs", nargs="+", type=Path,
+                    help="Flex Query XML files and/or Activity Statement CSVs")
     ap.add_argument("--out", type=Path, required=True, help="directory for the import files")
     ap.add_argument("--force", action="store_true", help="overwrite existing output files")
     args = ap.parse_args()
 
     out = args.out.resolve()
-    if any(src.resolve().parent == out for src in args.xml):
+    if any(src.resolve().parent == out for src in args.inputs):
         die(f"--out {args.out} holds an input file; choose another directory")
 
     portfolio_rows: list[dict] = []
     account_rows: list[dict] = []
     counts: Counter = Counter()
     cleaned: list[tuple[Path, bytes, int, int]] = []
-    for path in args.xml:
+    periods: list[tuple[dt.date, dt.date, Path]] = []
+    for path in args.inputs:
+        if path.suffix.lower() == ".csv":
+            try:
+                start, end = statement(path, portfolio_rows, account_rows, counts)
+            except (OSError, ValueError, KeyError) as e:
+                die(f"{path}: {e}")
+            for s, e, other in periods:
+                if start <= e and s <= end:
+                    die(f"{path.name} overlaps {other.name}; give statements whose periods do not overlap")
+            periods.append((start, end, path))
+            continue
         try:
             root = ET.parse(path).getroot()
             transfers(root, portfolio_rows, account_rows, counts)
