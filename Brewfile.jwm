@@ -25,7 +25,7 @@ brew "gopls"
 brew "herdr"
 brew "icu4c@76"
 brew "kubectl-cnpg"
-brew "libpq"
+brew "libpq", link: true
 brew "make"
 brew "ollama", restart_service: :changed
 brew "opentofu"
