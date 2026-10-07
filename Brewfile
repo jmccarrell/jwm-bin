@@ -39,7 +39,10 @@ brew "yazi"
 brew "yq"
 brew "zoxide"
 
+cask "ghostty"
+cask "orbstack"
 cask "postico"
+cask "rectangle"
 
 uv "ruff"
 uv "ty"
