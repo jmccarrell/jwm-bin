@@ -39,5 +39,13 @@ brew "yazi"
 brew "yq"
 brew "zoxide"
 
+cask "claude-code"
+cask "emacs-app"
+cask "font-fira-code-nerd-font"
+cask "ghostty"
+cask "orbstack"
+cask "postico"
+cask "rectangle"
+
 uv "ruff"
 uv "ty"
