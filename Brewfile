@@ -39,5 +39,7 @@ brew "yazi"
 brew "yq"
 brew "zoxide"
 
+cask "postico"
+
 uv "ruff"
 uv "ty"
