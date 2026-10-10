@@ -24,10 +24,10 @@ brew "jfrog-cli"
 brew "krew"
 brew "kube-ps1"
 brew "lastpass-cli"
-brew "libpq", link: true
 brew "mysql-client"
 brew "ollama", restart_service: :changed
 brew "parallel"
+brew "postgresql@18", link: true
 brew "pre-commit"
 brew "pwgen"
 brew "rancher-cli"
