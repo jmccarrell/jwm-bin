@@ -1,0 +1,621 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""schwab-history-to-pp -- turn Schwab History exports into Portfolio Performance imports.
+
+Portfolio Performance has no Schwab importer, in any format (checked at 0.88).
+This reads each account's History JSON (Accounts > Transaction History, date
+range All, export JSON) and writes the two CSVs its generic import takes:
+
+    TIINGO_API_TOKEN=$(bao-read 'kv-invest/tiingo/tiingo-api-token#api_token') \\
+        schwab-history-to-pp ~/pdata/investing/incoming/schwab/*/<newest>.json \\
+            --positions ~/pdata/investing/positions --out <dir>
+
+  <out>/portfolio-transactions.csv   CSV import as "Portfolio Transactions"
+  <out>/account-transactions.csv     CSV import as "Account Transactions"
+
+Import account-transactions.csv first, so purchases find the cash there.
+
+History reaches back four years and no further, so an account that held
+anything before then needs its holdings on the export's first day. They are
+rolled back from the newest positions file inside the export's dates that
+also gives cash: that file's holdings and cash, less every History row up to
+its date. Each holding becomes a Delivery (Inbound) on the first day, valued
+at Tiingo's last close before it, and the cash a Deposit.
+
+Every other positions file inside the export's dates is then checked: the
+History replayed to that file's date must give its share counts, and its cash
+where the file lists cash. A file that matches only the day before counts as a
+match, since one saved before a day's rows post, or after midnight, shows that
+day's start. Mismatches are printed, not corrected; the run
+writes its files and exits 1. Positions files are Schwab's own (a group's CSV,
+each account under a "<name> ...<last digits>" line) and TD Ameritrade's
+Positions_<account>_Stocks_<date>.xls (shares only, no cash). A file's date
+comes from its name; other files in the folders are skipped.
+
+  History Action                         Portfolio Performance
+  Buy, Reinvest Shares                   Buy
+  Sell                                   Sell, with Fees & Comm as Fees
+  Stock Split                            Delivery (Inbound) of the new shares at 0
+  Cash Dividend, Qualified Dividend,     Dividend
+    Qual Div Reinvest, Reinvest
+    Dividend, Pr Yr Cash Div
+  Div Adjustment                         cancels the dividend it reverses
+  Bank, Credit, Bond Interest            Interest
+  MoneyLink Deposit, MoneyLink Transfer  Deposit or Withdrawal, by sign
+  Tax Withholding                        Withdrawal: tax withheld from an IRA
+                                         distribution leaves with it
+  Journal, Journaled Shares,             nothing when a day's rows for one
+    Internal Transfer                    security, or for cash, net to zero (a
+                                         move between Schwab's books); unpaired
+                                         cash is a Deposit or Withdrawal
+
+Any other Action stops the run, naming it. A row dated "X as of Y" is booked on
+X, the day the cash moved.
+
+The account name is the History file's own prefix (<name>_XXX<digits>_...),
+and Portfolio Performance matches it to its securities and cash accounts by
+exact name. Schwab positions files are matched to an account by the last
+digits of its number, since its nickname may have changed; TD Ameritrade's by
+name. Securities are identified by ticker; Schwab gives no ISIN.
+
+The run prints, for each account and year, the totals of buys, sells, fees,
+dividends, interest, deposits and withdrawals worked out straight from the
+History, and stops if the converted rows do not add up to the same.
+
+--out must differ from every input's directory; existing output files are left
+alone unless --force.
+"""
+
+import argparse
+import csv
+import datetime as dt
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections import defaultdict
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+PORTFOLIO_COLUMNS = [
+    "Date", "Time", "Type", "Value", "Transaction Currency", "Shares", "Fees", "ISIN",
+    "Ticker Symbol", "Security Name", "Securities Account", "Cash Account", "Note",
+]
+ACCOUNT_COLUMNS = [
+    "Date", "Type", "Value", "Transaction Currency", "Taxes", "ISIN", "Ticker Symbol",
+    "Security Name", "Cash Account", "Note",
+]
+CURRENCY = "USD"
+TIINGO = "https://api.tiingo.com/tiingo/daily/{ticker}/prices?startDate={start}&endDate={end}"
+
+BUYS = {"Buy", "Reinvest Shares"}
+DIVIDENDS = {"Cash Dividend", "Qualified Dividend", "Qual Div Reinvest", "Reinvest Dividend",
+             "Pr Yr Cash Div"}
+INTEREST = {"Bank Interest", "Credit Interest", "Bond Interest"}
+CASH_FLOWS = {"MoneyLink Deposit", "MoneyLink Transfer", "Tax Withholding"}
+TRANSFERS = {"Journal", "Journaled Shares", "Internal Transfer"}
+ACTIONS = BUYS | DIVIDENDS | INTEREST | CASH_FLOWS | TRANSFERS | {
+    "Sell", "Stock Split", "Div Adjustment"}
+
+# TD Ameritrade rows name the security only in the description: "... DIVIDEND (SHV)".
+TICKER_IN_TEXT = re.compile(r"\(([A-Z][A-Z.]{0,5})\)")
+HISTORY_NAME = re.compile(r"^(.+?)_XXX(\d+)_Transactions_")
+FILE_DATE = re.compile(r"(\d{4})[-_](\d{2})[-_](\d{2})")
+SCHWAB_ACCOUNT = re.compile(r"^(.*\S)\s+\.\.\.(\d+)$")
+SHARE_EPSILON = Decimal("0.0001")
+CASH_EPSILON = Decimal("0.01")
+
+
+def die(msg: str) -> None:
+    print(f"schwab-history-to-pp: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def number(raw: str, what: str) -> Decimal:
+    text = raw.replace("$", "").replace(",", "").strip()
+    if text in ("", "--"):
+        return Decimal(0)
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        raise ValueError(f"{what} is {raw!r}, not a number") from None
+
+
+def us_date(raw: str) -> dt.date:
+    return dt.datetime.strptime(raw.strip(), "%m/%d/%Y").date()
+
+
+def money(value: Decimal) -> str:
+    return str(abs(value).quantize(Decimal("0.01")))
+
+
+def shares_text(value: Decimal) -> str:
+    # Fixed notation: a large position must not print as 1E+3.
+    return format(abs(value).normalize(), "f")
+
+
+@dataclass
+class Txn:
+    date: dt.date
+    as_of: dt.date | None
+    action: str
+    symbol: str
+    description: str
+    quantity: Decimal
+    fees: Decimal
+    amount: Decimal
+    shares: Decimal  # signed change to the holding
+
+    def note(self) -> str:
+        as_of = f" as of {self.as_of}" if self.as_of else ""
+        return f"Schwab {self.action}{as_of}: {self.description}"[:120]
+
+
+def txn(r: dict) -> Txn:
+    action = r["Action"]
+    if action not in ACTIONS:
+        raise ValueError(f"{r['Date']}: Action {action!r} is not one this script knows")
+    posted, _, as_of = r["Date"].partition(" as of ")
+    quantity = number(r.get("Quantity", ""), f"{r['Date']} {action} Quantity")
+    if action in TRANSFERS:
+        shares = quantity
+    elif action in BUYS or action == "Stock Split":
+        shares = abs(quantity)
+    elif action == "Sell":
+        shares = -abs(quantity)
+    else:
+        shares = Decimal(0)
+    symbol = (r.get("Symbol") or "").strip()
+    if not symbol:
+        m = TICKER_IN_TEXT.search(r.get("Description", ""))
+        symbol = m.group(1) if m else ""
+    return Txn(
+        date=us_date(posted), as_of=us_date(as_of) if as_of else None, action=action,
+        symbol=symbol, description=r.get("Description", ""), quantity=abs(quantity),
+        fees=number(r.get("Fees & Comm", ""), f"{r['Date']} {action} Fees & Comm"),
+        amount=number(r.get("Amount", ""), f"{r['Date']} {action} Amount"), shares=shares,
+    )
+
+
+def cancelled_dividends(rows: list[Txn], notes: list[str]) -> set[int]:
+    """Pair each Div Adjustment with the dividend it reverses; return both rows' ids."""
+    gone: set[int] = set()
+    for adj in (t for t in rows if t.action == "Div Adjustment"):
+        key = adj.as_of or adj.date
+        matches = [t for t in rows if t.action in DIVIDENDS and id(t) not in gone
+                   and t.symbol == adj.symbol and (t.as_of or t.date) == key
+                   and t.amount == -adj.amount and t.date <= adj.date]
+        if not matches:
+            raise ValueError(f"{adj.date} Div Adjustment of {adj.amount} on {adj.symbol} "
+                             "reverses no dividend")
+        hit = max(matches, key=lambda t: t.date)
+        gone |= {id(adj), id(hit)}
+        notes.append(f"{adj.date} Div Adjustment cancels {hit.action} of {hit.date} on "
+                     f"{adj.symbol}")
+    return gone
+
+
+def security_names(rows: list[Txn]) -> dict[str, str]:
+    """A name per ticker from a row that names the security itself; TD Ameritrade's
+    descriptions narrate the transaction instead ("TDA TRAN - Bought 7.091 (SHV) ...")."""
+    names: dict[str, str] = {}
+    for t in rows:
+        if t.symbol and not t.description.startswith("TDA TRAN"):
+            names.setdefault(t.symbol, t.description)
+    return names
+
+
+def transfer_groups(rows: list[Txn]) -> dict[tuple[dt.date, str], list[Txn]]:
+    groups: dict[tuple[dt.date, str], list[Txn]] = defaultdict(list)
+    for t in rows:
+        if t.action in TRANSFERS:
+            groups[(t.date, t.symbol)].append(t)
+    return groups
+
+
+def convert(rows: list[Txn], account: str) -> tuple[list[dict], list[dict], list[str]]:
+    """Portfolio rows, account rows, and notes on how journals and adjustments were treated."""
+    portfolio: list[dict] = []
+    cash: list[dict] = []
+    notes: list[str] = []
+    gone = cancelled_dividends(rows, notes)
+    names = security_names(rows)
+
+    def security(t: Txn) -> dict:
+        return {"Ticker Symbol": t.symbol, "Security Name": names.get(t.symbol, t.symbol)}
+
+    def flow(t: Txn, kind: str, value: Decimal) -> None:
+        cash.append({"Date": str(t.date), "Type": kind, "Value": money(value),
+                     "Transaction Currency": CURRENCY, "Cash Account": account,
+                     "Note": t.note()})
+
+    for t in rows:
+        if id(t) in gone or t.action in TRANSFERS:
+            continue
+        if t.action in BUYS or t.action == "Sell":
+            portfolio.append({
+                "Date": str(t.date), "Type": "Buy" if t.action in BUYS else "Sell",
+                "Value": money(t.amount), "Transaction Currency": CURRENCY,
+                "Shares": shares_text(t.quantity), "Fees": money(t.fees) if t.fees else "",
+                **security(t), "Securities Account": account, "Cash Account": account,
+                "Note": t.note(),
+            })
+        elif t.action == "Stock Split":
+            portfolio.append({
+                "Date": str(t.date), "Type": "Delivery (Inbound)", "Value": "0.00",
+                "Transaction Currency": CURRENCY, "Shares": shares_text(t.quantity),
+                **security(t), "Securities Account": account, "Note": t.note(),
+            })
+        elif t.action in DIVIDENDS:
+            flow(t, "Dividend", t.amount)
+            cash[-1].update(security(t))
+        elif t.action in INTEREST:
+            flow(t, "Interest" if t.amount >= 0 else "Interest Charge", t.amount)
+        elif t.action in CASH_FLOWS:
+            flow(t, "Deposit" if t.amount > 0 else "Withdrawal", t.amount)
+
+    for (day, symbol), group in sorted(transfer_groups(rows).items()):
+        moved = sum((t.shares for t in group), Decimal(0))
+        value = sum((t.amount for t in group), Decimal(0))
+        what = symbol or "cash"
+        if moved == 0 and value == 0:
+            notes.append(f"{day} {what}: {len(group)} transfer rows net to zero, skipped")
+        elif not symbol and moved == 0:
+            kind = "Deposit" if value > 0 else "Withdrawal"
+            flow(group[0], kind, value)
+            notes.append(f"{day} cash: unpaired {group[0].action} of {value} is a {kind}")
+        else:
+            raise ValueError(f"{day} {what}: transfer rows leave {moved} shares and {value} "
+                             "cash unpaired; nothing says what that is worth")
+    return portfolio, cash, notes
+
+
+#
+# positions files
+#
+
+@dataclass
+class Snapshot:
+    name: str
+    digits: str  # last digits of the account number; empty for TD Ameritrade
+    date: dt.date
+    holdings: dict[str, Decimal]
+    cash: Decimal | None
+    path: Path
+
+
+def belongs(snap: Snapshot, name: str, digits: str) -> bool:
+    return snap.digits == digits if snap.digits else snap.name == name
+
+
+def read_positions(path: Path) -> list[Snapshot]:
+    """Every account's holdings in one positions file; [] if it is not a known format."""
+    m = FILE_DATE.search(path.name)
+    if not m:
+        return []
+    day = dt.date(*map(int, m.groups()))
+    with path.open(encoding="utf-8-sig", errors="replace", newline="") as f:
+        text = f.read()
+    if text.lstrip('"').startswith("Positions for"):
+        return schwab_positions(text, day, path)
+    if '"Account:"' in text:
+        return tda_positions(text, day, path)
+    return []
+
+
+def schwab_positions(text: str, day: dt.date, path: Path) -> list[Snapshot]:
+    snaps: list[Snapshot] = []
+    header: list[str] = []
+    for r in csv.reader(text.splitlines()):
+        first = r[0].strip() if r else ""
+        if (m := SCHWAB_ACCOUNT.match(first)) and not any(c.strip() for c in r[1:]):
+            snaps.append(Snapshot(m.group(1), m.group(2), day, {}, None, path))
+            header = []
+        elif first == "Symbol":
+            header = r
+        elif snaps and header and first:
+            if first in ("Positions Total", "Account Total"):
+                header = []
+                continue
+            col = dict(zip(header, r))
+            value = next((v for k, v in col.items() if k.startswith(("Mkt Val", "Market Value"))), "")
+            if first == "Cash & Cash Investments":
+                snaps[-1].cash = number(value, f"{path.name} cash")
+                continue
+            qty = next((v for k, v in col.items() if k.startswith(("Qty", "Quantity"))), "")
+            snaps[-1].holdings[first] = number(qty, f"{path.name} {first} quantity")
+    return snaps
+
+
+def tda_positions(text: str, day: dt.date, path: Path) -> list[Snapshot]:
+    snap = Snapshot("", "", day, {}, None, path)
+    in_table = False
+    for r in csv.reader(text.splitlines(), delimiter="\t"):
+        if r[:1] == ["Account:"]:
+            snap.name = r[1].strip()
+        elif r[:2] == ["Symbol", "Qty"]:
+            in_table = True
+        elif in_table and r and r[0].strip():
+            snap.holdings[r[0].strip()] = number(r[1], f"{path.name} {r[0]} quantity")
+        elif in_table:
+            in_table = False
+    return [snap] if snap.name else []
+
+
+#
+# rolling back, replaying, checking
+#
+
+def roll_back(rows: list[Txn], snap: Snapshot) -> tuple[dict[str, Decimal], Decimal]:
+    """Holdings and cash before the first row, from a snapshot and every row up to its date."""
+    if snap.cash is None:
+        raise ValueError(f"{snap.path.name} lists no cash to roll back from")
+    holdings = dict(snap.holdings)
+    cash = snap.cash
+    for t in rows:
+        if t.date <= snap.date:
+            if t.shares:
+                holdings[t.symbol] = holdings.get(t.symbol, Decimal(0)) - t.shares
+            cash -= t.amount
+    return {k: v for k, v in holdings.items() if abs(v) > SHARE_EPSILON}, cash
+
+
+def replay(rows: list[Txn], holdings: dict[str, Decimal], cash: Decimal,
+           until: dt.date) -> tuple[dict[str, Decimal], Decimal]:
+    """Holdings and cash at the end of `until`; fails if a holding goes negative."""
+    held = dict(holdings)
+    by_day: dict[dt.date, list[Txn]] = defaultdict(list)
+    for t in rows:
+        if t.date <= until:
+            by_day[t.date].append(t)
+    for day in sorted(by_day):
+        for t in by_day[day]:
+            if t.shares:
+                held[t.symbol] = held.get(t.symbol, Decimal(0)) + t.shares
+            cash += t.amount
+        # Within a day Schwab lists rows in no useful order, so check at its end.
+        for symbol, qty in held.items():
+            if qty < -SHARE_EPSILON:
+                raise ValueError(f"{symbol} goes negative ({shares_text(qty)} short) on {day}")
+    return {k: v for k, v in held.items() if abs(v) > SHARE_EPSILON}, cash
+
+
+def differences(snap: Snapshot, held: dict[str, Decimal], balance: Decimal) -> list[str]:
+    problems = []
+    for symbol in sorted(set(held) | set(snap.holdings)):
+        mine, theirs = held.get(symbol, Decimal(0)), snap.holdings.get(symbol, Decimal(0))
+        if abs(mine - theirs) > SHARE_EPSILON:
+            problems.append(f"{symbol}: replay {mine.normalize():f}, file {theirs.normalize():f}")
+    if snap.cash is not None and abs(balance - snap.cash) > CASH_EPSILON:
+        problems.append(f"cash: replay {balance:.2f}, file {snap.cash:.2f}")
+    return problems
+
+
+def check(rows: list[Txn], holdings: dict[str, Decimal], cash: Decimal,
+          snaps: list[Snapshot]) -> list[tuple[Snapshot, list[str], bool]]:
+    """Each snapshot's differences from the replay at its date, and whether it matched
+    only the day before: a file saved before that day's rows posted, or after midnight."""
+    results = []
+    for snap in sorted(snaps, key=lambda x: x.date):
+        problems = differences(snap, *replay(rows, holdings, cash, snap.date))
+        early = False
+        if problems:
+            day_before = snap.date - dt.timedelta(days=1)
+            if not differences(snap, *replay(rows, holdings, cash, day_before)):
+                problems, early = [], True
+        results.append((snap, problems, early))
+    return results
+
+
+#
+# yearly totals
+#
+
+def totals_from_json(rows: list[Txn]) -> dict[tuple[int, str], Decimal]:
+    totals: dict[tuple[int, str], Decimal] = defaultdict(Decimal)
+    for t in rows:
+        y = t.date.year
+        if t.action in BUYS:
+            totals[(y, "buys")] += -t.amount
+        elif t.action == "Sell":
+            totals[(y, "sells")] += t.amount
+        if t.action in BUYS or t.action == "Sell":
+            totals[(y, "fees")] += t.fees
+        elif t.action in DIVIDENDS or t.action == "Div Adjustment":
+            totals[(y, "dividends")] += t.amount
+        elif t.action in INTEREST:
+            totals[(y, "interest")] += t.amount
+        elif t.action in CASH_FLOWS:
+            totals[(y, "deposits" if t.amount > 0 else "withdrawals")] += abs(t.amount)
+    for (day, symbol), group in transfer_groups(rows).items():
+        value = sum((t.amount for t in group), Decimal(0))
+        if not symbol and value:
+            totals[(day.year, "deposits" if value > 0 else "withdrawals")] += abs(value)
+    return {k: v for k, v in totals.items() if v}
+
+
+def totals_from_output(portfolio: list[dict], cash: list[dict]) -> dict[tuple[int, str], Decimal]:
+    kinds = {"Buy": "buys", "Sell": "sells", "Dividend": "dividends", "Interest": "interest",
+             "Deposit": "deposits", "Withdrawal": "withdrawals"}
+    totals: dict[tuple[int, str], Decimal] = defaultdict(Decimal)
+    for r in portfolio + cash:
+        if r["Note"].startswith("opening"):
+            continue
+        y = int(r["Date"][:4])
+        if r["Type"] in kinds:
+            totals[(y, kinds[r["Type"]])] += Decimal(r["Value"])
+        elif r["Type"] == "Interest Charge":
+            totals[(y, "interest")] -= Decimal(r["Value"])
+        if r.get("Fees"):
+            totals[(y, "fees")] += Decimal(r["Fees"])
+    return {k: v for k, v in totals.items() if v}
+
+
+def close_on(symbol: str, day: dt.date) -> Decimal:
+    """Tiingo's last close on or before `day`."""
+    token = os.environ.get("TIINGO_API_TOKEN", "")
+    if not token:
+        raise ValueError("TIINGO_API_TOKEN is not set; it prices the opening holdings")
+    url = TIINGO.format(ticker=symbol, start=day - dt.timedelta(days=10), end=day)
+    req = urllib.request.Request(url, headers={"Authorization": f"Token {token}"})
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                rows = json.load(resp)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 4:
+                time.sleep(60 * (attempt + 1))
+                continue
+            raise ValueError(f"Tiingo {symbol}: HTTP {e.code}") from None
+    closes = sorted((r["date"][:10], r["close"]) for r in rows if r.get("close") is not None)
+    if not closes:
+        raise ValueError(f"Tiingo has no close for {symbol} in the ten days to {day}")
+    return Decimal(str(closes[-1][1]))
+
+
+#
+# the run
+#
+
+def load(path: Path) -> tuple[str, str, dt.date, dt.date, list[Txn]]:
+    m = HISTORY_NAME.match(path.name)
+    if not m:
+        raise ValueError("name is not <account>_XXX<digits>_Transactions_..., as Schwab saves it")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    rows = [txn(r) for r in data["BrokerageTransactions"]]
+    rows.sort(key=lambda t: t.date)
+    return m.group(1), m.group(2), us_date(data["FromDate"]), us_date(data["ToDate"]), rows
+
+
+def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None:
+    if dest.exists() and not force:
+        print(f"{dest} exists, skipped (--force to replace)")
+        return
+    tmp = dest.with_name(dest.name + ".part")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=columns)
+        w.writeheader()
+        w.writerows(sorted(rows, key=lambda r: (r["Date"], r.get("Cash Account", ""),
+                                                r.get("Securities Account", ""), r["Note"])))
+    tmp.replace(dest)
+    print(f"wrote {dest} ({len(rows)} rows)")
+
+
+def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool) -> bool:
+    """Convert and check every account; return True if every positions file matched."""
+    out = out.resolve()
+    if any(p.resolve().parent == out for p in histories):
+        raise ValueError(f"--out {out} holds an input file; choose another directory")
+    snaps = [s for d in position_dirs for p in sorted(d.rglob("*Positions*"))
+             if p.suffix.lower() in (".csv", ".xls") for s in read_positions(p)]
+
+    portfolio_rows: list[dict] = []
+    account_rows: list[dict] = []
+    clean = True
+    seen: set[str] = set()
+    for path in histories:
+        try:
+            name, digits, start, end, rows = load(path)
+        except (OSError, ValueError, KeyError) as e:
+            raise ValueError(f"{path.name}: {e}") from None
+        if name in seen:
+            raise ValueError(f"two History files for {name}; give only the newest")
+        seen.add(name)
+        print(f"\n{name}: {len(rows)} rows, {start} to {end}")
+
+        portfolio, cash, notes = convert(rows, name)
+        for n in notes:
+            print(f"  {n}")
+        theirs, mine = totals_from_json(rows), totals_from_output(portfolio, cash)
+        print(f"  {'year':<6}{'total':<13}{'History':>16}{'converted':>16}")
+        for key in sorted(set(theirs) | set(mine)):
+            a, b = theirs.get(key, Decimal(0)), mine.get(key, Decimal(0))
+            print(f"  {key[0]:<6}{key[1]:<13}{a:>16,.2f}{b:>16,.2f}{'' if a == b else '  DIFFERS'}")
+        if theirs != mine:
+            raise ValueError(f"{name}: converted totals differ from the History's")
+
+        mine_snaps = [s for s in snaps if belongs(s, name, digits) and start <= s.date <= end]
+        anchors = [s for s in mine_snaps if s.cash is not None]
+        if not anchors:
+            raise ValueError(f"{name}: no positions file with cash between {start} and {end}")
+        anchor = max(anchors, key=lambda s: s.date)
+        holdings, opening_cash = roll_back(rows, anchor)
+        print(f"  opening on {start}, rolled back from {anchor.path.name}: "
+              + (", ".join(f"{k} {v.normalize():f}" for k, v in sorted(holdings.items())) or "nothing")
+              + f"; cash {opening_cash:,.2f}")
+        for symbol, qty in holdings.items():
+            if qty < 0:
+                raise ValueError(f"{name}: opening holding of {symbol} rolls back to {qty}")
+        if opening_cash < -CASH_EPSILON:
+            raise ValueError(f"{name}: opening cash rolls back to {opening_cash}, below zero")
+        replay(rows, holdings, opening_cash, end)
+
+        note = f"opening: rolled back from {anchor.path.name}"
+        names = security_names(rows)
+        for symbol, qty in sorted(holdings.items()):
+            price = close_on(symbol, start - dt.timedelta(days=1))
+            portfolio.append({
+                "Date": str(start), "Type": "Delivery (Inbound)", "Value": money(qty * price),
+                "Transaction Currency": CURRENCY, "Shares": shares_text(qty),
+                "Ticker Symbol": symbol, "Security Name": names.get(symbol, symbol),
+                "Securities Account": name, "Note": note,
+            })
+        if opening_cash > CASH_EPSILON:
+            cash.append({"Date": str(start), "Type": "Deposit", "Value": money(opening_cash),
+                         "Transaction Currency": CURRENCY, "Cash Account": name, "Note": note})
+
+        results = check(rows, holdings, opening_cash, mine_snaps)
+        bad = [(s, p) for s, p, _ in results if p]
+        early = sum(e for _, _, e in results)
+        print(f"  positions files checked: {len(results)}, matched: {len(results) - len(bad)}"
+              f" ({early} of them only as of the day before)")
+        for snap, _, e in results:
+            if e:
+                print(f"  matched the day before: {snap.date} {snap.path.name}")
+        before = [s for s in snaps if belongs(s, name, digits) and s.date < start]
+        if before:
+            last = max(before, key=lambda s: s.date)
+            gap = differences(last, holdings, opening_cash if last.cash is not None else Decimal(0))
+            print(f"  last positions file before the start, {last.date} {last.path.name}: "
+                  + ("same as the opening holdings" if not gap else "; ".join(gap)
+                     + " (rows between it and the start are not in this History)"))
+        for snap, problems in bad:
+            clean = False
+            print(f"  CHECK {snap.date} {snap.path.name}: " + "; ".join(problems))
+        portfolio_rows += portfolio
+        account_rows += cash
+
+    out.mkdir(parents=True, exist_ok=True)
+    print()
+    write_csv(out / "account-transactions.csv", ACCOUNT_COLUMNS, account_rows, force)
+    write_csv(out / "portfolio-transactions.csv", PORTFOLIO_COLUMNS, portfolio_rows, force)
+    return clean
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog=__doc__.split("\n\n", 1)[1])
+    ap.add_argument("histories", nargs="+", type=Path, help="History JSON, one per account")
+    ap.add_argument("--positions", nargs="+", type=Path, required=True,
+                    help="folders searched for positions files")
+    ap.add_argument("--out", type=Path, required=True, help="directory for the import files")
+    ap.add_argument("--force", action="store_true", help="overwrite existing output files")
+    args = ap.parse_args()
+    try:
+        clean = run(args.histories, args.positions, args.out, args.force)
+    except ValueError as e:
+        die(str(e))
+    sys.exit(0 if clean else 1)
+
+
+if __name__ == "__main__":
+    main()
