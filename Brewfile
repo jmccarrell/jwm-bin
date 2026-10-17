@@ -1,12 +1,15 @@
 # Common Brewfile — every mac. Read via `brew bundle --file`; never stowed.
 
 brew "ack"
+brew "atuin"
 brew "bash"
 brew "bash-completion@2"
+brew "bat"
 brew "coreutils"
 brew "crane"
 brew "direnv"
 brew "entr"
+brew "fd"
 brew "fzf"
 brew "gawk"
 brew "gh"

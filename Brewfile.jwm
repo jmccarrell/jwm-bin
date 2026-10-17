@@ -9,7 +9,6 @@ tap "mistertea/et", "https://github.com/MisterTea/homebrew-et", trusted: true
 tap "siderolabs/tap", trusted: true
 brew "age"
 brew "aspell"
-brew "atuin"
 brew "openssl@3"
 brew "readline"
 brew "sqlite"
