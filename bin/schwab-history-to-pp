@@ -18,6 +18,11 @@ range All, export JSON) and writes the two CSVs its generic import takes:
 
 Import account-transactions.csv first, so purchases find the cash there.
 
+An account whose earlier years come from tda-statements-to-pp continues from
+that run's closing.json instead (--continue-from): no opening is booked, and
+the run stops unless the opening rolled back below equals the file's holdings
+and cash on the day before the export's first day.
+
 History reaches back four years and no further, so an account that held
 anything before then needs its holdings on the export's first day. They are
 rolled back from the newest positions file inside the export's dates that
@@ -56,7 +61,9 @@ Any other Action stops the run, naming it. A row dated "X as of Y" is booked on
 X, the day the cash moved.
 
 The account name is the History file's own prefix (<name>_XXX<digits>_...),
-and Portfolio Performance matches it to its securities and cash accounts by
+or the first part of pdata's name for it
+(<name>.<from>_<to>.schwab.transactions.json, with --digits <name>=<digits>,
+since that name drops them), and Portfolio Performance matches it to its securities and cash accounts by
 exact name. Schwab positions files are matched to an account by the last
 digits of its number, since its nickname may have changed; TD Ameritrade's by
 name. Securities are identified by ticker; Schwab gives no ISIN.
@@ -107,6 +114,7 @@ ACTIONS = BUYS | DIVIDENDS | INTEREST | CASH_FLOWS | TRANSFERS | {
 # TD Ameritrade rows name the security only in the description: "... DIVIDEND (SHV)".
 TICKER_IN_TEXT = re.compile(r"\(([A-Z][A-Z.]{0,5})\)")
 HISTORY_NAME = re.compile(r"^(.+?)_XXX(\d+)_Transactions_")
+PDATA_NAME = re.compile(r"^(.+?)\.\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.schwab\.transactions\.json$")
 FILE_DATE = re.compile(r"(\d{4})[-_](\d{2})[-_](\d{2})")
 SCHWAB_ACCOUNT = re.compile(r"^(.*\S)\s+\.\.\.(\d+)$")
 SHARE_EPSILON = Decimal("0.0001")
@@ -485,14 +493,23 @@ def close_on(symbol: str, day: dt.date) -> Decimal:
 # the run
 #
 
-def load(path: Path) -> tuple[str, str, dt.date, dt.date, list[Txn]]:
-    m = HISTORY_NAME.match(path.name)
-    if not m:
-        raise ValueError("name is not <account>_XXX<digits>_Transactions_..., as Schwab saves it")
+def account_of(path: Path, digits: dict[str, str]) -> tuple[str, str]:
+    if m := HISTORY_NAME.match(path.name):
+        return m.group(1), m.group(2)
+    if m := PDATA_NAME.match(path.name):
+        if m.group(1) not in digits:
+            raise ValueError(f"give --digits {m.group(1)}=<last digits of its account number>")
+        return m.group(1), digits[m.group(1)]
+    raise ValueError("name is neither <account>_XXX<digits>_Transactions_..., as Schwab saves "
+                     "it, nor <account>.<from>_<to>.schwab.transactions.json, as pdata keeps it")
+
+
+def load(path: Path, digits: dict[str, str]) -> tuple[str, str, dt.date, dt.date, list[Txn]]:
+    name, account_digits = account_of(path, digits)
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     rows = [txn(r) for r in data["BrokerageTransactions"]]
     rows.sort(key=lambda t: t.date)
-    return m.group(1), m.group(2), us_date(data["FromDate"]), us_date(data["ToDate"]), rows
+    return name, account_digits, us_date(data["FromDate"]), us_date(data["ToDate"]), rows
 
 
 def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None:
@@ -509,7 +526,23 @@ def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> 
     print(f"wrote {dest} ({len(rows)} rows)")
 
 
-def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool) -> bool:
+def closing_differs(closing: dict, start: dt.date, holdings: dict[str, Decimal],
+                    cash: Decimal) -> list[str]:
+    """How a tda-statements-to-pp closing.json disagrees with the rolled-back opening."""
+    if dt.date.fromisoformat(closing["date"]) != start - dt.timedelta(days=1):
+        return [f"it closes on {closing['date']}, not the day before {start}"]
+    theirs = {k: Decimal(v) for k, v in closing["holdings"].items()}
+    problems = [f"{k}: opening {holdings.get(k, Decimal(0)).normalize():f}, "
+                f"statements {theirs.get(k, Decimal(0)).normalize():f}"
+                for k in sorted(set(holdings) | set(theirs))
+                if abs(holdings.get(k, Decimal(0)) - theirs.get(k, Decimal(0))) > SHARE_EPSILON]
+    if abs(cash - Decimal(closing["cash"])) > CASH_EPSILON:
+        problems.append(f"cash: opening {cash:.2f}, statements {Decimal(closing['cash']):.2f}")
+    return problems
+
+
+def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool,
+        digits: dict[str, str] | None = None, continue_from: list[Path] | None = None) -> bool:
     """Convert and check every account; return True if every positions file matched."""
     out = out.resolve()
     if any(p.resolve().parent == out for p in histories):
@@ -517,13 +550,18 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
     snaps = [s for d in position_dirs for p in sorted(d.rglob("*Positions*"))
              if p.suffix.lower() in (".csv", ".xls") for s in read_positions(p)]
 
+    closings: dict[str, tuple[Path, dict]] = {}
+    for p in continue_from or []:
+        c = json.loads(p.read_text())
+        closings[c["account"]] = (p, c)
+
     portfolio_rows: list[dict] = []
     account_rows: list[dict] = []
     clean = True
     seen: set[str] = set()
     for path in histories:
         try:
-            name, digits, start, end, rows = load(path)
+            name, account_digits, start, end, rows = load(path, digits or {})
         except (OSError, ValueError, KeyError) as e:
             raise ValueError(f"{path.name}: {e}") from None
         if name in seen:
@@ -542,7 +580,7 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
         if theirs != mine:
             raise ValueError(f"{name}: converted totals differ from the History's")
 
-        mine_snaps = [s for s in snaps if belongs(s, name, digits) and start <= s.date <= end]
+        mine_snaps = [s for s in snaps if belongs(s, name, account_digits) and start <= s.date <= end]
         anchors = [s for s in mine_snaps if s.cash is not None]
         if not anchors:
             raise ValueError(f"{name}: no positions file with cash between {start} and {end}")
@@ -558,9 +596,18 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
             raise ValueError(f"{name}: opening cash rolls back to {opening_cash}, below zero")
         replay(rows, holdings, opening_cash, end)
 
-        note = f"opening: rolled back from {anchor.path.name}"
         names = security_names(rows)
-        for symbol, qty in sorted(holdings.items()):
+        if name in closings:
+            source, closing = closings.pop(name)
+            if problems := closing_differs(closing, start, holdings, opening_cash):
+                raise ValueError(f"{name}: {source.name} does not match the opening: "
+                                 + "; ".join(problems))
+            print(f"  continues from {source.name}, which matches the opening; none booked")
+            holdings_to_book, cash_to_book = {}, Decimal(0)
+        else:
+            holdings_to_book, cash_to_book = holdings, opening_cash
+        note = f"opening: rolled back from {anchor.path.name}"
+        for symbol, qty in sorted(holdings_to_book.items()):
             price = close_on(symbol, start - dt.timedelta(days=1))
             portfolio.append({
                 "Date": str(start), "Type": "Delivery (Inbound)", "Value": money(qty * price),
@@ -568,7 +615,7 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
                 "Ticker Symbol": symbol, "Security Name": names.get(symbol, symbol),
                 "Securities Account": name, "Note": note,
             })
-        if opening_cash > CASH_EPSILON:
+        if cash_to_book > CASH_EPSILON:
             cash.append({"Date": str(start), "Type": "Deposit", "Value": money(opening_cash),
                          "Transaction Currency": CURRENCY, "Cash Account": name, "Note": note})
 
@@ -580,7 +627,7 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
         for snap, _, e in results:
             if e:
                 print(f"  matched the day before: {snap.date} {snap.path.name}")
-        before = [s for s in snaps if belongs(s, name, digits) and s.date < start]
+        before = [s for s in snaps if belongs(s, name, account_digits) and s.date < start]
         if before:
             last = max(before, key=lambda s: s.date)
             gap = differences(last, holdings, opening_cash if last.cash is not None else Decimal(0))
@@ -593,6 +640,9 @@ def run(histories: list[Path], position_dirs: list[Path], out: Path, force: bool
         portfolio_rows += portfolio
         account_rows += cash
 
+    if closings:
+        raise ValueError(f"no History given for {', '.join(sorted(closings))}, "
+                         "named in --continue-from")
     out.mkdir(parents=True, exist_ok=True)
     print()
     write_csv(out / "account-transactions.csv", ACCOUNT_COLUMNS, account_rows, force)
@@ -609,9 +659,15 @@ def main() -> None:
                     help="folders searched for positions files")
     ap.add_argument("--out", type=Path, required=True, help="directory for the import files")
     ap.add_argument("--force", action="store_true", help="overwrite existing output files")
+    ap.add_argument("--digits", action="append", default=[], metavar="NAME=DIGITS",
+                    help="last digits of an account's number, for a History file in pdata's name")
+    ap.add_argument("--continue-from", action="append", default=[], type=Path, metavar="CLOSING",
+                    help="a tda-statements-to-pp closing.json the account continues from")
     args = ap.parse_args()
     try:
-        clean = run(args.histories, args.positions, args.out, args.force)
+        digits = dict(d.split("=", 1) for d in args.digits)
+        clean = run(args.histories, args.positions, args.out, args.force, digits,
+                    args.continue_from)
     except ValueError as e:
         die(str(e))
     sys.exit(0 if clean else 1)
