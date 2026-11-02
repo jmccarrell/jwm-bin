@@ -290,3 +290,33 @@ def test_run_writes_both_csvs_with_an_opening_position(tmp_path, monkeypatch):
     account = (out / "account-transactions.csv").read_text().splitlines()
     assert portfolio[1].startswith("2022-01-03,,Delivery (Inbound),5.25,USD,1.5,")
     assert account[1].startswith("2022-01-03,Deposit,5.00,USD")
+
+
+def test_pdata_name_takes_its_digits_from_the_option(tmp_path):
+    hist = history(tmp_path, "acct-a.2022-01-03_2022-12-30.schwab.transactions.json", [])
+    assert s.load(hist, {"acct-a": "222"})[:2] == ("acct-a", "222")
+    with pytest.raises(ValueError, match="--digits acct-a="):
+        s.load(hist, {})
+
+
+# The same account as above, whose earlier years came from tda-statements-to-pp.
+@pytest.mark.parametrize("cash,fails", [("5.00", False), ("6.00", True)])
+def test_run_continues_from_a_statements_closing(tmp_path, monkeypatch, cash, fails):
+    hist = history(tmp_path, "acct-a_XXX222_Transactions_20221231-120000.json", [
+        row("01/04/2022", "Buy", "XYZ", "1", amount="-$4.00"),
+    ])
+    pos = tmp_path / "positions"
+    pos.mkdir()
+    (pos / "Group-Positions-2022-03-04-164843.csv").write_text(SCHWAB)
+    closing = tmp_path / "closing.json"
+    closing.write_text(json.dumps({"account": "acct-a", "date": "2022-01-02", "cash": cash,
+                                   "holdings": {"XYZ": "1.5"}}))
+    out = tmp_path / "out"
+    monkeypatch.setattr(s, "close_on", lambda symbol, day: D("3.50"))
+    if fails:
+        with pytest.raises(ValueError, match="cash: opening 5.00, statements 6.00"):
+            s.run([hist], [pos], out, False, continue_from=[closing])
+        return
+    s.run([hist], [pos], out, False, continue_from=[closing])
+    assert "opening" not in (out / "portfolio-transactions.csv").read_text()
+    assert len((out / "account-transactions.csv").read_text().splitlines()) == 1
