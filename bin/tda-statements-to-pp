@@ -1,0 +1,491 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""tda-statements-to-pp -- turn TD Ameritrade monthly statements into Portfolio Performance imports.
+
+TD Ameritrade's own transaction exports are gone with tdameritrade.com, and
+Schwab's History reaches back only four years. The monthly statement PDFs
+(kept by Schwab for ten years) list every transaction, so this reads them
+through `pdftotext -layout` and writes the two CSVs schwab-history-to-pp
+writes, with the same columns:
+
+    tda-statements-to-pp ~/pdata/investing/accounts/<account>/*/<account>.*.td-ameritrade.monthly-statement.pdf \\
+        --until 2022-10-10 --out <dir>
+
+  <out>/portfolio-transactions.csv   CSV import as "Portfolio Transactions"
+  <out>/account-transactions.csv     CSV import as "Account Transactions"
+  <out>/closing.json                 holdings and cash at the end of --until
+
+Statements are named <account>.<YYYY-MM>.td-ameritrade.monthly-statement.pdf,
+one account per run, every month from the account's opening with none missing.
+The account starts empty.
+
+Every statement is checked, whatever --until says, and the run stops on the
+first mismatch:
+  - each month's rows, summed by category, equal its Cash Activity Summary, and
+    its opening balance plus the rows equals its closing balance;
+  - each month-end's shares equal its Account Positions, and the rows' cash
+    equals the statement's cash plus its FDIC Insured Deposit Account.
+Only rows traded on or before --until are written. closing.json is what
+schwab-history-to-pp continues from, in place of rolling back its own opening.
+
+  Statement type                         Portfolio Performance
+  Buy - Securities Purchased             Buy, commission and fees as Fees
+  Sell - Securities Sold                 Sell, commission and fees as Fees
+  Div/Int - Income on a security         Dividend
+  Div/Int - Income INTEREST CREDIT       Interest
+  the month's IDA Interest               Interest on the last day of the month,
+                                         in place of the Div/Int - Other rows:
+                                         most of it is credited inside the
+                                         deposit account with no activity row
+  Div/Int - Securities Sold              Dividend: cash in lieu of fractional
+                                         shares never booked
+  Div/Int - Expense                      Taxes if it names a tax, else Fees
+  Journal - Contributions, Contributions Deposit
+  Distributions                          Withdrawal
+  Journal - Other, FDIC sweep            nothing: the deposit account is cash
+  Journal - Other, Courtesy Credit or    Fees Refund
+    Courtesy Adjustment
+  Received - Other, Delivered - Other    Delivery (Inbound/Outbound) valued at
+                                         zero: splits, spin-offs, exchanges
+
+Any other row stops the run, naming it, as does a transfer to another broker
+traded on or before --until. Dates are trade dates.
+
+Securities are identified by ticker, except where Tiingo's ticker now names
+another company or none (TIINGO_ID below); there the ticker field carries
+Tiingo's identifier, so pp-tiingo-prices fetches the right history.
+
+--out must not hold an input file; existing output files are left alone unless
+--force.
+"""
+
+import argparse
+import calendar
+import csv
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+
+PORTFOLIO_COLUMNS = [
+    "Date", "Time", "Type", "Value", "Transaction Currency", "Shares", "Fees", "ISIN",
+    "Ticker Symbol", "Security Name", "Securities Account", "Cash Account", "Note",
+]
+ACCOUNT_COLUMNS = [
+    "Date", "Type", "Value", "Transaction Currency", "Taxes", "ISIN", "Ticker Symbol",
+    "Security Name", "Cash Account", "Note",
+]
+CURRENCY = "USD"
+
+# Statement symbols whose Tiingo ticker now belongs to another company, or to none
+# (mcc-invest/invest#200).
+TIINGO_ID = {
+    "AMTD": "US000000000721",  # TD Ameritrade; AMTD is now AMTD IDEA Group
+    "VG": "US000000002908",    # Vonage; VG is now Venture Global
+    "VIVO": "US000000002918",  # Meridian Bioscience; VIVO is now VivoPower
+    "NYCB": "FLG",             # New York Community Bancorp, renamed Flagstar
+}
+
+STATEMENT_NAME = re.compile(r"^(.+?)\.(\d{4})-(\d{2})\.td-ameritrade\.monthly-statement\.pdf$")
+ROW = re.compile(r"^\s*(\d\d/\d\d/\d\d)\s+(\d\d/\d\d/\d\d)\s+(Cash|Margin|Short)\s+(.*\S)\s*$")
+NUMERIC = re.compile(r"^\(?\$?\s?-?[\d,]*\.?\d+\)?-?$|^\$?\s?-$")
+WRAPPED_QTY = re.compile(r"^\s+(.*?\S)?\s{10,}([\d,]*\.?\d+-?)\s*$")
+FEE = re.compile(r"^(?:Commission(?:/Fee)?|Regulatory Fee)\s*\$?\s*([\d,]+\.\d+)$")
+# A positions line; a long name can run into its symbol with one space.
+POSITION = re.compile(r"^\S.*?\s+([A-Z][A-Z.]{0,5})\s{2,}([\d,]+(?:\.\d+)?)\s{2,}\$?\s?[\d,]+\.\d+")
+IDA_LINE = re.compile(r"^Insrd Dep Acct \(IDA\)\s+(\S+)")
+IDA_INTEREST = re.compile(r"^\s*IDA Interest\s+(\S+)")
+SUMMARY = ["Opening Balance", "Securities Purchased", "Securities Sold", "Contributions",
+           "Distributions", "Income", "Expense", "Other", "Closing Balance"]
+CATEGORY = {
+    "Buy - Securities Purchased": "Securities Purchased",
+    "Sell - Securities Sold": "Securities Sold",
+    "Div/Int - Securities Sold": "Securities Sold",
+    "Div/Int - Income": "Income",
+    "Div/Int - Expense": "Expense",
+    "Journal - Contributions": "Contributions",
+    "- Contributions": "Contributions",
+    "- Distributions": "Distributions",
+}
+TRADES = ("Buy - ", "Sell - ", "Received - ", "Delivered -")
+SWEEP = ("PURCHASE FDIC INSURED", "REDEMPTION FDIC INSURED")
+COURTESY = ("Courtesy Credit", "Courtesy Adjustment")
+BROKER_TRANSFER = "TDA TO CS&CO"
+SHARE_EPSILON = Decimal("0.0001")
+
+
+def die(msg: str) -> None:
+    print(f"tda-statements-to-pp: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def money(raw: str) -> Decimal:
+    text = raw.replace("$", "").replace(",", "").strip()
+    if text in ("", "-"):
+        return Decimal(0)
+    if text.startswith("(") and text.endswith(")"):
+        return -Decimal(text[1:-1])
+    return Decimal(text)
+
+
+def quantity(raw: str | None) -> Decimal | None:
+    if raw in (None, "", "-"):
+        return None
+    neg = raw.endswith("-")
+    value = Decimal(raw.rstrip("-").replace(",", ""))
+    return -value if neg else value
+
+
+def us_date(raw: str) -> dt.date:
+    return dt.datetime.strptime(raw, "%m/%d/%y").date()
+
+
+def amount_text(value: Decimal) -> str:
+    return str(abs(value).quantize(Decimal("0.01")))
+
+
+def shares_text(value: Decimal) -> str:
+    return format(abs(value).normalize(), "f")
+
+
+@dataclass
+class Row:
+    trade: dt.date
+    type: str
+    description: str
+    symbol: str
+    qty: Decimal | None
+    amount: Decimal
+    extra: list[str] = field(default_factory=list)
+
+    def fees(self) -> Decimal:
+        return sum((money(m.group(1)) for e in self.extra if (m := FEE.match(e))), Decimal(0))
+
+    def note(self) -> str:
+        return f"TD Ameritrade {self.type.lstrip('- ')}: {self.description}"[:120]
+
+
+@dataclass
+class Statement:
+    month: str
+    path: Path
+    rows: list[Row]
+    summary: dict[str, Decimal]
+    positions: dict[str, Decimal]
+    deposit_account: Decimal
+    deposit_interest: Decimal
+
+    def booked(self) -> list[Row]:
+        """The rows as booked: no sweeps, and the deposit account's interest from the
+        Income Summary in place of its Div/Int - Other rows."""
+        rows = [r for r in self.rows if r.type != "Div/Int - Other" and not is_sweep(r)]
+        if self.deposit_interest:
+            y, m = map(int, self.month.split("-"))
+            rows.append(Row(trade=dt.date(y, m, calendar.monthrange(y, m)[1]), type="IDA Interest",
+                            description="FDIC Insured Deposit Account", symbol="-", qty=None,
+                            amount=self.deposit_interest))
+        return rows
+
+
+def parse_rows(lines: list[str]) -> list[Row]:
+    rows: list[Row] = []
+    cur: Row | None = None
+    for line in lines:
+        if m := ROW.match(line):
+            chunks: list[str] = []
+            for c in re.split(r"\s{2,}", m.group(4)):
+                if chunks and chunks[-1] == "$":  # "$ 0.00" split in two
+                    chunks[-1] += " " + c
+                else:
+                    chunks.append(c)
+            amount, head = chunks[-2], chunks[:-3]  # balance and price are not needed
+            qty = None
+            if len(head) >= 3 and NUMERIC.match(head[-1].replace(" ", "")):
+                qty = head.pop()
+            if len(head) == 2:  # the name ran into the symbol: "TD AMERITRADE HOLDING CORP AMTD"
+                head[1:] = head[1].rsplit(" ", 1)
+            cur = Row(trade=us_date(m.group(1)), type=head[0], description=" ".join(head[1:-1]),
+                      symbol=head[-1], qty=quantity(qty), amount=money(amount))
+            rows.append(cur)
+        elif cur is not None:
+            if not line.strip() or not line.startswith("     "):
+                cur = None
+            elif (w := WRAPPED_QTY.match(line)) and cur.qty is None:
+                cur.qty = quantity(w.group(2))
+                if w.group(1):
+                    cur.extra.append(w.group(1))
+            else:
+                cur.extra.append(line.strip())
+    return rows
+
+
+def parse_summary(lines: list[str]) -> dict[str, Decimal]:
+    start = next((i for i, l in enumerate(lines) if l.startswith("Cash Activity Summary")), None)
+    if start is None:
+        raise ValueError("no Cash Activity Summary")
+    out: dict[str, Decimal] = {}
+    for line in lines[start + 1:start + 16]:
+        for label in SUMMARY:
+            if line.startswith(label) and label not in out:
+                tokens = [t for t in line[len(label):].split() if t != "$"]
+                out[label] = money(tokens[0]) if tokens else Decimal(0)
+    missing = [k for k in SUMMARY if k not in out]
+    if missing:
+        raise ValueError(f"Cash Activity Summary lacks {', '.join(missing)}")
+    return out
+
+
+def parse_positions(lines: list[str]) -> dict[str, Decimal]:
+    held: dict[str, Decimal] = {}
+    inside = False
+    for line in lines:
+        if "Account Positions" in line:
+            inside = True
+        elif inside and line.startswith("Total Cash Account"):
+            break
+        elif inside and (m := POSITION.match(line)) and m.group(1) != "MMDA1":
+            held[m.group(1)] = Decimal(m.group(2).replace(",", ""))
+    return held
+
+
+def parse_deposit_account(lines: list[str]) -> Decimal:
+    """The FDIC Insured Deposit Account's current value in the Portfolio Summary."""
+    for line in lines:
+        if m := IDA_LINE.match(line):
+            return money(m.group(1))
+    return Decimal(0)
+
+
+def parse_deposit_interest(lines: list[str]) -> Decimal:
+    for line in lines:
+        if m := IDA_INTEREST.match(line):
+            return money(m.group(1))
+    return Decimal(0)
+
+
+def read_statement(path: Path) -> Statement:
+    m = STATEMENT_NAME.match(path.name)
+    if not m:
+        raise ValueError("name is not <account>.<YYYY-MM>.td-ameritrade.monthly-statement.pdf")
+    lines = subprocess.run(["pdftotext", "-layout", str(path), "-"], capture_output=True,
+                           text=True, check=True).stdout.splitlines()
+    return Statement(month=f"{m.group(2)}-{m.group(3)}", path=path, rows=parse_rows(lines),
+                     summary=parse_summary(lines), positions=parse_positions(lines),
+                     deposit_account=parse_deposit_account(lines),
+                     deposit_interest=parse_deposit_interest(lines))
+
+
+def is_sweep(r: Row) -> bool:
+    return r.type == "Journal - Other" and r.description.startswith(SWEEP)
+
+
+def check_summary(st: Statement) -> list[str]:
+    totals = {k: Decimal(0) for k in SUMMARY[1:-1]}
+    for r in st.rows:
+        totals[CATEGORY.get(r.type, "Other")] += r.amount
+    problems = [f"{k}: rows {v}, statement {st.summary[k]}" for k, v in totals.items()
+                if v != st.summary[k]]
+    closing = st.summary["Opening Balance"] + sum((r.amount for r in st.rows), Decimal(0))
+    if closing != st.summary["Closing Balance"]:
+        problems.append(f"closing balance: rows give {closing}, statement {st.summary['Closing Balance']}")
+    return problems
+
+
+def apply(held: dict[str, Decimal], r: Row) -> None:
+    if r.type.startswith(TRADES) and r.qty is not None:
+        held[r.symbol] = held.get(r.symbol, Decimal(0)) + r.qty
+
+
+def months_between(first: str, last: str) -> list[str]:
+    y, m = map(int, first.split("-"))
+    out = []
+    while f"{y:04d}-{m:02d}" <= last:
+        out.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def check(statements: list[Statement]) -> None:
+    """Every month against its summary and positions; stops on the first mismatch."""
+    months = [st.month for st in statements]
+    gaps = sorted(set(months_between(months[0], months[-1])) - set(months))
+    if gaps:
+        raise ValueError(f"statements missing for {', '.join(gaps)}")
+    # Positions are month-end, so only the cash says whether the first month opens empty.
+    if statements[0].summary["Opening Balance"]:
+        raise ValueError(f"{months[0]} does not open empty; start from the account's first statement")
+    held: dict[str, Decimal] = {}
+    cash = Decimal(0)
+    for st in statements:
+        if problems := check_summary(st):
+            raise ValueError(f"{st.month} against its Cash Activity Summary: " + "; ".join(problems))
+        for r in st.rows:
+            apply(held, r)
+        cash += sum((r.amount for r in st.booked()), Decimal(0))
+        mine = {k: v for k, v in held.items() if abs(v) > SHARE_EPSILON}
+        diff = [f"{k}: rows {mine.get(k, 0)}, statement {st.positions.get(k, 0)}"
+                for k in sorted(set(mine) | set(st.positions)) if mine.get(k) != st.positions.get(k)]
+        theirs = st.summary["Closing Balance"] + st.deposit_account
+        if cash != theirs:
+            diff.append(f"cash: rows {cash}, statement {theirs} with the deposit account")
+        if diff:
+            raise ValueError(f"{st.month} against its positions: " + "; ".join(diff))
+
+
+def convert(rows: list[Row], account: str, names: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    portfolio: list[dict] = []
+    cash: list[dict] = []
+
+    def security(r: Row) -> dict:
+        return {"Ticker Symbol": TIINGO_ID.get(r.symbol, r.symbol),
+                "Security Name": names.get(r.symbol, r.symbol)}
+
+    def flow(r: Row, kind: str, with_security: bool = False) -> None:
+        cash.append({"Date": str(r.trade), "Type": kind, "Value": amount_text(r.amount),
+                     "Transaction Currency": CURRENCY, "Cash Account": account, "Note": r.note(),
+                     **(security(r) if with_security else {})})
+
+    def unknown(r: Row) -> ValueError:
+        return ValueError(f"{r.trade} {r.type} {r.description!r} is not a row this script knows")
+
+    for r in rows:
+        if r.type in ("Buy - Securities Purchased", "Sell - Securities Sold"):
+            fees = r.fees()
+            portfolio.append({
+                "Date": str(r.trade), "Type": "Buy" if r.type.startswith("Buy") else "Sell",
+                "Value": amount_text(r.amount), "Transaction Currency": CURRENCY,
+                "Shares": shares_text(r.qty), "Fees": amount_text(fees) if fees else "",
+                **security(r), "Securities Account": account, "Cash Account": account,
+                "Note": r.note(),
+            })
+        elif r.type.startswith(("Received - ", "Delivered -")):
+            if BROKER_TRANSFER in " ".join([r.description, *r.extra]):
+                raise ValueError(f"{r.trade}: {r.symbol} leaves for another broker; "
+                                 "--until must end before the move")
+            portfolio.append({
+                "Date": str(r.trade),
+                "Type": "Delivery (Inbound)" if r.qty > 0 else "Delivery (Outbound)",
+                "Value": "0.00", "Transaction Currency": CURRENCY, "Shares": shares_text(r.qty),
+                **security(r), "Securities Account": account, "Note": r.note(),
+            })
+        elif r.type == "Div/Int - Income":
+            if r.symbol == "-":
+                flow(r, "Interest" if r.amount >= 0 else "Interest Charge")
+            else:
+                flow(r, "Dividend", with_security=True)
+        elif r.type == "IDA Interest":
+            flow(r, "Interest")
+        elif r.type == "Div/Int - Securities Sold":
+            flow(r, "Dividend", with_security=True)
+        elif r.type == "Div/Int - Expense":
+            kind = "Taxes" if any("TAX" in e.upper() for e in r.extra) else "Fees"
+            flow(r, kind, with_security=r.symbol != "-")
+        elif r.type in ("Journal - Contributions", "- Contributions"):
+            flow(r, "Deposit")
+        elif r.type == "- Distributions":
+            flow(r, "Withdrawal")
+        elif r.type == "Journal - Other":
+            if r.description.startswith(COURTESY) and r.amount > 0:
+                flow(r, "Fees Refund")
+            elif r.description.startswith(BROKER_TRANSFER):
+                raise ValueError(f"{r.trade}: cash leaves for another broker; "
+                                 "--until must end before the move")
+            else:
+                raise unknown(r)
+        else:
+            raise unknown(r)
+    return portfolio, cash
+
+
+def closing(rows: list[Row], account: str, until: dt.date) -> dict:
+    held: dict[str, Decimal] = {}
+    cash = Decimal(0)
+    for r in rows:
+        apply(held, r)
+        cash += r.amount
+    return {"account": account, "date": str(until), "cash": str(cash),
+            "holdings": {k: shares_text(v) for k, v in sorted(held.items())
+                         if abs(v) > SHARE_EPSILON}}
+
+
+def write_csv(dest: Path, columns: list[str], rows: list[dict], force: bool) -> None:
+    if dest.exists() and not force:
+        print(f"{dest} exists, skipped (--force to replace)")
+        return
+    tmp = dest.with_name(dest.name + ".part")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=columns)
+        w.writeheader()
+        w.writerows(rows)
+    tmp.replace(dest)
+    print(f"wrote {dest} ({len(rows)} rows)")
+
+
+def run(paths: list[Path], until: dt.date, out: Path, force: bool) -> None:
+    out = out.resolve()
+    if any(p.resolve().parent == out for p in paths):
+        raise ValueError(f"--out {out} holds an input file; choose another directory")
+    statements = []
+    for p in paths:
+        try:
+            statements.append(read_statement(p))
+        except (OSError, ValueError, subprocess.CalledProcessError) as e:
+            raise ValueError(f"{p.name}: {e}") from None
+    statements.sort(key=lambda st: st.month)
+    accounts = {STATEMENT_NAME.match(st.path.name).group(1) for st in statements}
+    if len(accounts) != 1:
+        raise ValueError(f"one account per run; got {', '.join(sorted(accounts))}")
+    account = accounts.pop()
+    check(statements)
+    every = [r for st in statements for r in st.booked()]
+    print(f"{account}: {len(statements)} statements, {statements[0].month} to "
+          f"{statements[-1].month}, {len(every)} rows; every month matches its summary and positions")
+
+    kept = [r for r in every if r.trade <= until]
+    names: dict[str, str] = {}
+    for r in every:
+        if r.symbol not in ("", "-"):
+            names.setdefault(r.symbol, r.description)
+    portfolio, cash = convert(kept, account, names)
+    end = closing(kept, account, until)
+    print(f"through {until}: {len(kept)} rows; closing holdings "
+          + (", ".join(f"{k} {v}" for k, v in end["holdings"].items()) or "none")
+          + f"; cash {end['cash']}")
+
+    out.mkdir(parents=True, exist_ok=True)
+    write_csv(out / "account-transactions.csv", ACCOUNT_COLUMNS, cash, force)
+    write_csv(out / "portfolio-transactions.csv", PORTFOLIO_COLUMNS, portfolio, force)
+    dest = out / "closing.json"
+    if dest.exists() and not force:
+        print(f"{dest} exists, skipped (--force to replace)")
+    else:
+        dest.write_text(json.dumps(end, indent=2) + "\n")
+        print(f"wrote {dest}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog=__doc__.split("\n\n", 1)[1])
+    ap.add_argument("statements", nargs="+", type=Path, help="monthly statement PDFs, one account")
+    ap.add_argument("--until", type=dt.date.fromisoformat, required=True,
+                    help="last trade date written (YYYY-MM-DD)")
+    ap.add_argument("--out", type=Path, required=True, help="directory for the import files")
+    ap.add_argument("--force", action="store_true", help="overwrite existing output files")
+    args = ap.parse_args()
+    try:
+        run(args.statements, args.until, args.out, args.force)
+    except ValueError as e:
+        die(str(e))
+
+
+if __name__ == "__main__":
+    main()
