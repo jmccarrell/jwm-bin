@@ -61,6 +61,29 @@ else
     DAILY_FAILURES+=(brew-curlrc)
 fi
 
+# launchd runs a missed 08:45 job on the next wake, which can be a maintenance
+# wake that has no network and sleeps again within seconds. Every step below
+# needs the network, so wait for it, and report one failure rather than one per
+# repo if it never comes. The wait counts attempts, not elapsed time, so time
+# the mac spends asleep mid-wait does not use it up.
+network_up() {
+    /usr/bin/nc -z -G 5 github.com 443 > /dev/null 2>&1
+}
+
+network_attempts=0
+until network_up; do
+    if (( ++network_attempts >= 30 )); then
+        failures=( no-network "${DAILY_FAILURES[@]}" )
+        printf 'daily: FAILED: %s\n' "${failures[*]}"
+        osascript -e "display notification \"Failed: ${failures[*]}. See ~/Library/Logs/daily.log\" with title \"daily failed\"" >/dev/null 2>&1 || true
+        exit 1
+    fi
+    sleep 10
+done
+if (( network_attempts > 0 )); then
+    printf 'daily: network up after %d failed checks\n' "${network_attempts}"
+fi
+
 # Tools are not probed with `command -v` before use, here or in jwm_update_tools.
 # Both macs have all of them, so a missing one is a fault worth hearing about --
 gs_common
